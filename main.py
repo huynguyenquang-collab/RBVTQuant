@@ -26,12 +26,9 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-PARENT = ROOT.parent
-if str(PARENT) not in sys.path:
-    sys.path.insert(0, str(PARENT))
 
 import quantizers.base_quantizer as base_q
-from NCCQuant.calibration_utils import load_calibration_data
+from calibration_utils import load_calibration_data
 from eval_perplexity import RBVTSlidingWindowEvaluator
 from quantizers import apply_rbvt, get_quantizer
 
