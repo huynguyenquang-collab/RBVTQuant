@@ -1,0 +1,8 @@
+torch
+transformers
+datasets
+tqdm
+numpy
+sentencepiece
+accelerate
+safetensors
