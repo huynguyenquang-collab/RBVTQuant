@@ -33,6 +33,10 @@ from eval_perplexity import RBVTSlidingWindowEvaluator
 from quantizers import apply_rbvt, get_quantizer
 
 
+def _hf_device_map(device: str):
+    return {"": device} if device != "auto" else "auto"
+
+
 def load_calibration_texts(tokenizer, dataset_name: str, n_samples: int, seqlen: int, seed: int) -> List[str]:
     return load_calibration_data(
         dataset_name=dataset_name,
@@ -288,6 +292,7 @@ def evaluate_quantized_model(
 def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
+    p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
     p.add_argument("--method", type=str, default="rbvt", choices=["rtn", "rbvt"], help="Quantization method")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
@@ -337,7 +342,9 @@ def main():
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise ValueError(f"--device={device} requested but CUDA is not available")
     print(
         f"Device: {device} | method={args.method} | quantizer={args.quantizer} | "
         f"skip_lmhead={args.skip_lmhead}"
@@ -362,7 +369,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
+        device_map=_hf_device_map(device),
         trust_remote_code=True,
     )
     model.eval()

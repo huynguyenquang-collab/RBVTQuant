@@ -32,7 +32,7 @@ from quantizers import apply_rbvt, get_quantizer
 def load_wikitext2_simple(n_samples: int = 128) -> List[str]:
     from datasets import load_dataset
 
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
     texts = [it["text"] for it in ds if len(it["text"].strip()) > 0]
     return texts[:n_samples]
 

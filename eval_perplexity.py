@@ -20,6 +20,10 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+def _hf_device_map(device: str):
+    return {"": device} if device != "auto" else "auto"
+
+
 class RBVTSlidingWindowEvaluator:
     def __init__(self, device: str = "cuda", seed: int = 42, stride: int = 512, max_length: int = 2048, cache_dir: str = "./dataset_cache"):
         self.device = device
@@ -48,7 +52,7 @@ class RBVTSlidingWindowEvaluator:
             with open(cache_file, "rb") as f:
                 return pickle.load(f)
 
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
         full_text = "\n".join([x for x in dataset["text"] if x])
         print(f"  Loaded continuous stream ({len(full_text)} chars)")
 
@@ -170,7 +174,7 @@ class RBVTSlidingWindowEvaluator:
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch.float16,
-                device_map=self.device,
+                device_map=_hf_device_map(self.device),
                 trust_remote_code=True,
             )
 

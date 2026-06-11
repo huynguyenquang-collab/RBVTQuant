@@ -101,7 +101,7 @@ def get_wikitext2_calibration_data(tokenizer, n_samples=128, seqlen=2048, seed=4
     print(f"\n  No cache found, downloading from WikiText-2...")
     random.seed(seed)
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split=split)
     texts = [item["text"] for item in dataset if len(item["text"].strip()) > 0]
 
     print(f"  Total non-empty texts: {len(texts)}")
