@@ -225,6 +225,11 @@ def quantize_model(
 
         module.weight.data = W_out.to(W.dtype)
 
+        del qres, W_out, W
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
     if method == "rbvt":
         print(
             "RBVT summary | "
