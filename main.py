@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import random
 import sys
@@ -45,6 +46,13 @@ def load_calibration_texts(tokenizer, dataset_name: str, n_samples: int, seqlen:
         seqlen=seqlen,
         seed=seed,
     )
+
+
+def save_run_summary(output_dir: str, summary: dict):
+    summary_path = Path(output_dir) / "run_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+    print(f"Saved run summary to {summary_path}")
 
 
 class ActStatsCollector:
@@ -230,7 +238,26 @@ def quantize_model(
     else:
         print("RTN summary | plain nearest-codeword quantization completed.")
 
-    return model
+    quant_stats = {
+        "method": method,
+        "num_linear_layers": len(linears),
+        "skip_lmhead": skip_lmhead,
+    }
+    if method == "rbvt":
+        quant_stats.update(
+            {
+                "flips": total_flips,
+                "candidates": total_candidates,
+                "boundary_kept": total_boundary_kept,
+                "bias_before": total_bias_before,
+                "bias_after": total_bias_after,
+                "objective_before": total_objective_before,
+                "objective_after": total_objective_after,
+                "variance_increase": total_variance_increase,
+            }
+        )
+
+    return model, quant_stats
 
 
 def evaluate_quantized_model(
@@ -351,7 +378,7 @@ def main():
     )
 
     if args.eval_float:
-        evaluate_quantized_model(
+        float_results = evaluate_quantized_model(
             model_path=args.model_path,
             model_name="FLOAT",
             eval_device=device,
@@ -361,6 +388,8 @@ def main():
             eval_cache_dir=args.eval_cache_dir,
             eval_samples=args.eval_samples,
         )
+    else:
+        float_results = {}
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -391,7 +420,7 @@ def main():
         seqlen=args.max_length,
         seed=args.seed,
     )
-    quantize_model(
+    model, quant_stats = quantize_model(
         model=model,
         tokenizer=tokenizer,
         quantizer=quantizer,
@@ -417,7 +446,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    evaluate_quantized_model(
+    quant_results = evaluate_quantized_model(
         model_path=args.output_dir,
         model_name=args.method.upper(),
         eval_device=device,
@@ -427,6 +456,30 @@ def main():
         eval_cache_dir=args.eval_cache_dir,
         eval_samples=args.eval_samples,
     )
+
+    run_summary = {
+        "model_path": args.model_path,
+        "output_dir": args.output_dir,
+        "device": args.device,
+        "quantizer": args.quantizer,
+        "quantization": quant_stats,
+        "calibration": {
+            "dataset": args.calib_dataset,
+            "n_calib": args.n_calib,
+            "max_length": args.max_length,
+            "seed": args.seed,
+        },
+        "evaluation": {
+            "stride": args.eval_stride,
+            "max_length": args.eval_max_length,
+            "samples": args.eval_samples,
+            "cache_dir": args.eval_cache_dir,
+            "float_model": float_results,
+            "quantized_model": quant_results,
+        },
+        "args": vars(args),
+    }
+    save_run_summary(args.output_dir, run_summary)
 
     print("Done.")
 
