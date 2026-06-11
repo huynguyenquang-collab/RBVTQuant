@@ -228,7 +228,6 @@ def quantize_model(
         del qres, W_out, W
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        gc.collect()
 
     if method == "rbvt":
         print(
@@ -452,7 +451,6 @@ def main():
     tokenizer.save_pretrained(args.output_dir)
 
     del model
-    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
