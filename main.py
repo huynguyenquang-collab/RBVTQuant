@@ -16,6 +16,7 @@ import os
 import random
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -32,7 +33,15 @@ if str(ROOT) not in sys.path:
 import quantizers.base_quantizer as base_q
 from calibration_utils import load_calibration_data
 from eval_perplexity import RBVTSlidingWindowEvaluator
+from lm_eval_runner import LMEvalHarnessRunner
 from quantizers import apply_rbvt, get_quantizer
+from runtime_utils import (
+    DEFAULT_LM_EVAL_TASKS,
+    build_model_slug,
+    load_runtime_env,
+    resolve_hf_token,
+    resolve_wandb_api_key,
+)
 
 
 def _hf_device_map(device: str):
@@ -54,6 +63,84 @@ def save_run_summary(output_dir: str, summary: dict):
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
     print(f"Saved run summary to {summary_path}")
+
+
+def build_run_name(args) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    parts = [
+        args.method,
+        build_model_slug(args.model_path),
+        args.quantizer,
+        f"s{args.seed}",
+        timestamp,
+    ]
+    return "_".join(parts)
+
+
+def collect_wandb_metrics(results: dict) -> dict[str, float]:
+    flat: dict[str, float] = {}
+
+    perplexity_results = results.get("perplexity", {})
+    for model_name, dataset_payload in perplexity_results.items():
+        if not isinstance(dataset_payload, dict):
+            continue
+        for dataset_name, metrics in dataset_payload.items():
+            if not isinstance(metrics, dict):
+                continue
+            perplexity = metrics.get("perplexity")
+            if isinstance(perplexity, (int, float)) and not isinstance(perplexity, bool):
+                flat[f"perplexity/{model_name}/{dataset_name}"] = perplexity
+
+    lm_eval_results = results.get("lm_eval", {})
+    for model_name, payload in lm_eval_results.items():
+        if not isinstance(payload, dict):
+            continue
+        summary = payload.get("summary")
+        raw_results = payload.get("raw", {}).get("results")
+        task_results = summary if isinstance(summary, dict) else raw_results if isinstance(raw_results, dict) else None
+        if not isinstance(task_results, dict):
+            continue
+        for task_name, metrics in task_results.items():
+            if not isinstance(metrics, dict):
+                continue
+            accuracy = metrics.get("acc,none")
+            if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
+                flat[f"lm_eval/{model_name}/{task_name}"] = accuracy
+
+    return flat
+
+
+def log_results_to_wandb(args, run_name: str, results: dict):
+    try:
+        import wandb
+    except ImportError:
+        print("\nWarning: wandb is not installed. Install 'wandb' or disable logging with --no-wandb.")
+        return
+
+    api_key = resolve_wandb_api_key()
+    if api_key:
+        wandb.login(key=api_key, relogin=True)
+
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=run_name,
+        job_type=args.method,
+        tags=[f"method:{args.method}", f"quantizer:{args.quantizer}", f"model:{build_model_slug(args.model_path)}"],
+        config=vars(args),
+        reinit=True,
+    )
+    if run is None:
+        return
+
+    flat_metrics = collect_wandb_metrics(results)
+    if flat_metrics:
+        wandb.log(flat_metrics)
+
+    wandb.summary["source_model"] = args.model_path
+    wandb.summary["output_dir"] = args.output_dir
+    wandb.summary["lm_eval_tasks"] = list(args.lm_eval_tasks) if args.include_lm_eval else []
+    wandb.finish()
 
 
 def cleanup_output_dir(output_dir: str, keep_files: tuple[str, ...] = ("run_summary.json",)):
@@ -290,6 +377,7 @@ def evaluate_quantized_model(
     eval_max_length: int,
     eval_cache_dir: str,
     eval_samples: int,
+    hf_token: str | None,
 ):
     evaluator = RBVTSlidingWindowEvaluator(
         device=eval_device,
@@ -297,6 +385,7 @@ def evaluate_quantized_model(
         stride=eval_stride,
         max_length=eval_max_length,
         cache_dir=eval_cache_dir,
+        hf_token=hf_token,
     )
 
     datasets = {
@@ -337,6 +426,19 @@ def evaluate_quantized_model(
     return results
 
 
+def run_lm_eval(args, model_paths: dict[str, str], hf_token: str | None, run_name: str) -> dict:
+    runner = LMEvalHarnessRunner(
+        tasks=args.lm_eval_tasks,
+        device=args.device,
+        batch_size=args.lm_eval_batch_size,
+        num_fewshot=args.lm_eval_num_fewshot,
+        output_dir=args.lm_eval_output_dir,
+        run_name=run_name,
+        hf_token=hf_token,
+    )
+    return runner.run(model_paths)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
@@ -372,11 +474,25 @@ def build_parser():
     p.add_argument("--eval-cache-dir", type=str, default="./dataset_cache")
     p.add_argument("--eval-float", dest="eval_float", action="store_true", default=False, help="Also compute perplexity for the original float model path before quantization")
     p.add_argument("--no-eval-float", dest="eval_float", action="store_false")
+    p.add_argument("--include-lm-eval", dest="include_lm_eval", action="store_true", default=True)
+    p.add_argument("--no-lm-eval", dest="include_lm_eval", action="store_false")
+    p.add_argument("--lm-eval-task-preset", choices=sorted(DEFAULT_LM_EVAL_TASKS), default="extended")
+    p.add_argument("--lm-eval-tasks", nargs="+", default=list(DEFAULT_LM_EVAL_TASKS["extended"]))
+    p.add_argument("--lm-eval-num-fewshot", type=int, default=None)
+    p.add_argument("--lm-eval-batch-size", default="auto")
+    p.add_argument("--lm-eval-output-dir", type=str, default="./outputs/lm_eval")
+    p.add_argument("--use-wandb", dest="use_wandb", action="store_true", default=False)
+    p.add_argument("--no-wandb", dest="use_wandb", action="store_false")
+    p.add_argument("--wandb-project", type=str, default="rbvtquant")
+    p.add_argument("--wandb-entity", type=str, default=None)
     return p
 
 
 def main():
+    load_runtime_env()
     args = build_parser().parse_args()
+    if args.lm_eval_tasks == list(DEFAULT_LM_EVAL_TASKS["extended"]) and args.lm_eval_task_preset in DEFAULT_LM_EVAL_TASKS:
+        args.lm_eval_tasks = list(DEFAULT_LM_EVAL_TASKS[args.lm_eval_task_preset])
     if args.rbvt_lambda < 0.0:
         raise ValueError("--rbvt-lambda must be non-negative")
 
@@ -392,6 +508,8 @@ def main():
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = args.device
+    hf_token = resolve_hf_token()
+    run_name = build_run_name(args)
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError(f"--device={device} requested but CUDA is not available")
     print(
@@ -409,11 +527,12 @@ def main():
             eval_max_length=args.eval_max_length,
             eval_cache_dir=args.eval_cache_dir,
             eval_samples=args.eval_samples,
+            hf_token=hf_token,
         )
     else:
         float_results = {}
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -422,6 +541,7 @@ def main():
         torch_dtype=torch.bfloat16,
         device_map=_hf_device_map(device),
         trust_remote_code=True,
+        token=hf_token,
     )
     model.eval()
 
@@ -477,11 +597,21 @@ def main():
         eval_max_length=args.eval_max_length,
         eval_cache_dir=args.eval_cache_dir,
         eval_samples=args.eval_samples,
+        hf_token=hf_token,
+    )
+    model_paths = {args.method.upper(): args.output_dir}
+    if args.eval_float:
+        model_paths["FLOAT"] = args.model_path
+    lm_eval_results = (
+        run_lm_eval(args, model_paths, hf_token=hf_token, run_name=run_name)
+        if args.include_lm_eval
+        else {}
     )
 
     run_summary = {
         "model_path": args.model_path,
         "output_dir": args.output_dir,
+        "run_name": run_name,
         "device": args.device,
         "quantizer": args.quantizer,
         "quantization": quant_stats,
@@ -498,10 +628,23 @@ def main():
             "cache_dir": args.eval_cache_dir,
             "float_model": float_results,
             "quantized_model": quant_results,
+            "lm_eval": lm_eval_results,
         },
         "args": vars(args),
     }
     save_run_summary(args.output_dir, run_summary)
+    if args.use_wandb:
+        log_results_to_wandb(
+            args,
+            run_name=run_name,
+            results={
+                "perplexity": {
+                    "FLOAT": float_results,
+                    args.method.upper(): quant_results,
+                },
+                "lm_eval": lm_eval_results,
+            },
+        )
     cleanup_output_dir(args.output_dir)
 
     print("Done.")

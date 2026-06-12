@@ -14,3 +14,5 @@ calibration_cache/
 *.safetensors
 *.pt
 *.pth
+.env
+

@@ -7,7 +7,7 @@ Design choices:
 
 - Keep the block-wise codebook/scaling backbone from `NCCQuant`.
 - Support both plain nearest-codeword quantization (`RTN`) and `RBVT`.
-- Use one unified entrypoint for quantization and perplexity evaluation.
+- Use one unified entrypoint for quantization, perplexity evaluation, and `lm-eval`.
 
 Main entrypoint:
 
@@ -30,3 +30,11 @@ python main.py \
   --quantizer nf4 \
   --output-dir ./rtn_model
 ```
+
+Runtime notes:
+
+- `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
+- `lm-eval` uses the same task presets as the reference source. The default preset is `extended`:
+  `arc_easy`, `arc_challenge`, `hellaswag`, `piqa`, `winogrande`, `boolq`, `rte`, `openbookqa`, `lambada_openai`.
+- `wandb` logging is opt-in with `--use-wandb`.
+- Only perplexity and `lm-eval` `acc,none` are logged to `wandb`.

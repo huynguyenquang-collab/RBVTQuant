@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+
 MODELS=(
   "meta-llama/Llama-3.1-8B"
   "mistralai/Mistral-7B-v0.3"
@@ -21,6 +25,13 @@ slugify() {
 
 for model in "${MODELS[@]}"; do
   model_slug="$(slugify "$model")"
+  WANDB_ARGS=()
+  if [ "$USE_WANDB" = "1" ]; then
+    WANDB_ARGS+=(--use-wandb --wandb-project "$WANDB_PROJECT")
+    if [ -n "$WANDB_ENTITY" ]; then
+      WANDB_ARGS+=(--wandb-entity "$WANDB_ENTITY")
+    fi
+  fi
 
   python main.py \
     --model-path "$model" \
@@ -32,7 +43,8 @@ for model in "${MODELS[@]}"; do
     --rbvt-topk 0 \
     --calib-dataset c4 \
     --max-length 2048 \
-    --eval-max-length 2048
+    --eval-max-length 2048 \
+    "${WANDB_ARGS[@]}"
 
   python main.py \
     --model-path "$model" \
@@ -44,5 +56,6 @@ for model in "${MODELS[@]}"; do
     --rbvt-topk 0 \
     --calib-dataset c4 \
     --max-length 2048 \
-    --eval-max-length 2048
+    --eval-max-length 2048 \
+    "${WANDB_ARGS[@]}"
 done

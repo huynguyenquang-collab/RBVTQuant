@@ -6,3 +6,6 @@ numpy
 sentencepiece
 accelerate
 safetensors
+lm-eval==0.4.9.1
+wandb
+python-dotenv

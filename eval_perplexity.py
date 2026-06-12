@@ -25,13 +25,22 @@ def _hf_device_map(device: str):
 
 
 class RBVTSlidingWindowEvaluator:
-    def __init__(self, device: str = "cuda", seed: int = 42, stride: int = 512, max_length: int = 2048, cache_dir: str = "./dataset_cache"):
+    def __init__(
+        self,
+        device: str = "cuda",
+        seed: int = 42,
+        stride: int = 512,
+        max_length: int = 2048,
+        cache_dir: str = "./dataset_cache",
+        hf_token: str | None = None,
+    ):
         self.device = device
         self.seed = seed
         self.stride = stride
         self.max_length = max_length
         self.results = {}
         self.cache_dir = Path(cache_dir)
+        self.hf_token = hf_token
         self.cache_dir.mkdir(exist_ok=True)
 
         print("=" * 80)
@@ -52,7 +61,12 @@ class RBVTSlidingWindowEvaluator:
             with open(cache_file, "rb") as f:
                 return pickle.load(f)
 
-        dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+        dataset = load_dataset(
+            "Salesforce/wikitext",
+            "wikitext-2-raw-v1",
+            split="test",
+            token=self.hf_token,
+        )
         full_text = "\n".join([x for x in dataset["text"] if x])
         print(f"  Loaded continuous stream ({len(full_text)} chars)")
 
@@ -71,7 +85,13 @@ class RBVTSlidingWindowEvaluator:
             with open(cache_file, "rb") as f:
                 return pickle.load(f)
 
-        dataset = load_dataset("allenai/c4", "en", split="validation", streaming=True)
+        dataset = load_dataset(
+            "allenai/c4",
+            "en",
+            split="validation",
+            streaming=True,
+            token=self.hf_token,
+        )
         texts = []
         for item in tqdm(dataset, total=n_samples, desc="  Collecting C4"):
             if len(texts) >= n_samples:
@@ -167,7 +187,12 @@ class RBVTSlidingWindowEvaluator:
         print(f"\n  Evaluating {model_name} on {dataset_name}...")
 
         try:
-            tokenizer = self.load_tokenizer(model_path)
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                use_fast=True,
+                token=self.hf_token,
+            )
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
@@ -176,6 +201,7 @@ class RBVTSlidingWindowEvaluator:
                 torch_dtype=torch.float16,
                 device_map=_hf_device_map(self.device),
                 trust_remote_code=True,
+                token=self.hf_token,
             )
 
             results = self.evaluate_sliding_window(model, tokenizer, texts)
