@@ -36,5 +36,7 @@ Runtime notes:
 - `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
 - `lm-eval` uses the same task presets as the reference source. The default preset is `extended`:
   `arc_easy`, `arc_challenge`, `hellaswag`, `piqa`, `winogrande`, `boolq`, `rte`, `openbookqa`, `lambada_openai`.
+- For a fast harness sanity check, run:
+  `bash bash/test_lm_eval.sh`
 - `wandb` logging is opt-in with `--use-wandb`.
 - Only perplexity and `lm-eval` `acc,none` are logged to `wandb`.

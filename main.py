@@ -432,6 +432,7 @@ def run_lm_eval(args, model_paths: dict[str, str], hf_token: str | None, run_nam
         device=args.device,
         batch_size=args.lm_eval_batch_size,
         num_fewshot=args.lm_eval_num_fewshot,
+        limit=args.lm_eval_limit,
         output_dir=args.lm_eval_output_dir,
         run_name=run_name,
         hf_token=hf_token,
@@ -480,6 +481,7 @@ def build_parser():
     p.add_argument("--lm-eval-tasks", nargs="+", default=list(DEFAULT_LM_EVAL_TASKS["extended"]))
     p.add_argument("--lm-eval-num-fewshot", type=int, default=None)
     p.add_argument("--lm-eval-batch-size", default="auto")
+    p.add_argument("--lm-eval-limit", type=float, default=None, help="Optional sample limit for quick lm-eval smoke runs")
     p.add_argument("--lm-eval-output-dir", type=str, default="./outputs/lm_eval")
     p.add_argument("--use-wandb", dest="use_wandb", action="store_true", default=False)
     p.add_argument("--no-wandb", dest="use_wandb", action="store_false")
@@ -529,8 +531,14 @@ def main():
             eval_samples=args.eval_samples,
             hf_token=hf_token,
         )
+        float_lm_eval_results = (
+            run_lm_eval(args, {"FLOAT": args.model_path}, hf_token=hf_token, run_name=run_name)
+            if args.include_lm_eval
+            else {}
+        )
     else:
         float_results = {}
+        float_lm_eval_results = {}
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
     if tokenizer.pad_token is None:
@@ -599,14 +607,12 @@ def main():
         eval_samples=args.eval_samples,
         hf_token=hf_token,
     )
-    model_paths = {args.method.upper(): args.output_dir}
-    if args.eval_float:
-        model_paths["FLOAT"] = args.model_path
-    lm_eval_results = (
-        run_lm_eval(args, model_paths, hf_token=hf_token, run_name=run_name)
+    quant_lm_eval_results = (
+        run_lm_eval(args, {args.method.upper(): args.output_dir}, hf_token=hf_token, run_name=run_name)
         if args.include_lm_eval
         else {}
     )
+    lm_eval_results = {**float_lm_eval_results, **quant_lm_eval_results}
 
     run_summary = {
         "model_path": args.model_path,

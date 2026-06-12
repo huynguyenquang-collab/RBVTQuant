@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = ROOT / ".env"
 
 DEFAULT_LM_EVAL_TASKS = {
+    "smoke": [
+        "piqa",
+    ],
     "core": [
         "arc_easy",
         "arc_challenge",

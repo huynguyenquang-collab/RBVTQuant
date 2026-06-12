@@ -16,6 +16,7 @@ class LMEvalHarnessRunner:
         device: str = "cuda",
         batch_size: str = "auto",
         num_fewshot: int | None = None,
+        limit: int | float | None = None,
         output_dir: str = "./outputs/lm_eval",
         run_name: str | None = None,
         hf_token: str | None = None,
@@ -24,6 +25,7 @@ class LMEvalHarnessRunner:
         self.device = device
         self.batch_size = batch_size
         self.num_fewshot = num_fewshot
+        self.limit = limit
         self.output_dir = Path(output_dir)
         self.run_name = run_name or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.hf_token = hf_token
@@ -102,6 +104,7 @@ class LMEvalHarnessRunner:
             device=self.device,
             batch_size=self.batch_size,
             num_fewshot=self.num_fewshot,
+            limit=self.limit,
             log_samples=False,
         )
         self._write_raw_results(model_name, payload)
