@@ -126,9 +126,17 @@ class LMEvalHarnessRunner:
     def _patch_transformers_for_lm_eval(self):
         import transformers
 
-        existing = getattr(transformers, "AutoModelForVision2Seq", None)
+        existing = transformers.__dict__.get("AutoModelForVision2Seq")
         if existing is not None:
             return
+
+        def safe_get_attr(name: str):
+            if name in transformers.__dict__:
+                return transformers.__dict__[name]
+            try:
+                return getattr(transformers, name)
+            except Exception:
+                return None
 
         fallback = None
         for attr in (
@@ -137,12 +145,12 @@ class LMEvalHarnessRunner:
             "AutoModelForSeq2SeqLM",
             "AutoModelForCausalLM",
         ):
-            fallback = getattr(transformers, attr, None)
+            fallback = safe_get_attr(attr)
             if fallback is not None:
                 break
 
         if fallback is not None:
-            setattr(transformers, "AutoModelForVision2Seq", fallback)
+            transformers.__dict__["AutoModelForVision2Seq"] = fallback
 
     def evaluate_model(self, model_name: str, model_path: str) -> dict:
         try:
