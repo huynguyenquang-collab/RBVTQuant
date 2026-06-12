@@ -74,6 +74,13 @@ class LMEvalHarnessRunner:
             json.dump(self._make_json_safe(payload), handle, indent=2, sort_keys=True)
 
     def _patch_datasets_repo_aliases(self):
+        """Map legacy short dataset ids to canonical HF repo ids.
+
+        Recent lm-eval + transformers versions no longer need the older
+        AutoModelForVision2Seq workaround, but some environments still resolve
+        task datasets through short ids such as ``winogrande`` or ``boolq``.
+        Normalizing them here keeps the harness path stable across machines.
+        """
         try:
             import datasets
             import datasets.load as datasets_load
@@ -123,39 +130,9 @@ class LMEvalHarnessRunner:
         patch_callable(datasets_load, "get_dataset_config_names", ("path", "path_or_name"))
         patch_callable(datasets_load, "dataset_module_factory", ("path", "path_or_name"))
 
-    def _patch_transformers_for_lm_eval(self):
-        import transformers
-
-        existing = transformers.__dict__.get("AutoModelForVision2Seq")
-        if existing is not None:
-            return
-
-        def safe_get_attr(name: str):
-            if name in transformers.__dict__:
-                return transformers.__dict__[name]
-            try:
-                return getattr(transformers, name)
-            except Exception:
-                return None
-
-        fallback = None
-        for attr in (
-            "AutoModelForImageTextToText",
-            "AutoModelForVisionEncoderDecoder",
-            "AutoModelForSeq2SeqLM",
-            "AutoModelForCausalLM",
-        ):
-            fallback = safe_get_attr(attr)
-            if fallback is not None:
-                break
-
-        if fallback is not None:
-            transformers.__dict__["AutoModelForVision2Seq"] = fallback
-
     def evaluate_model(self, model_name: str, model_path: str) -> dict:
         try:
             self._patch_datasets_repo_aliases()
-            self._patch_transformers_for_lm_eval()
             from lm_eval import evaluator
         except ImportError as exc:
             raise RuntimeError(
