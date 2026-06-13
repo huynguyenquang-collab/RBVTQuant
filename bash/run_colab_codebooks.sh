@@ -18,7 +18,7 @@ METHODS="${METHODS:-rtn rbvt}"
 
 LOCAL_OUTPUT_ROOT="${LOCAL_OUTPUT_ROOT:-/content/rbvtquant_outputs/codebook_benchmark}"
 DRIVE_OUTPUT_ROOT="${DRIVE_OUTPUT_ROOT:-/content/drive/MyDrive/RBVTQuant/codebook_benchmark}"
-USE_DRIVE="${USE_DRIVE:-1}"
+USE_DRIVE="${USE_DRIVE:-auto}"
 LOG_DIR="${LOG_DIR:-}"
 
 CALIB_DATASET="${CALIB_DATASET:-c4}"
@@ -68,6 +68,18 @@ fi
 
 if [ -z "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-${HUGGINGFACE_TOKEN:-}}}" ]; then
   echo "Error: HF_TOKEN is required for $MODEL." >&2
+  exit 1
+fi
+
+if [ "$USE_DRIVE" = "auto" ]; then
+  if [ -d /content/drive/MyDrive ]; then
+    USE_DRIVE=1
+  else
+    USE_DRIVE=0
+  fi
+fi
+if [ "$USE_DRIVE" != "0" ] && [ "$USE_DRIVE" != "1" ]; then
+  echo "Error: USE_DRIVE must be auto, 0, or 1; got $USE_DRIVE." >&2
   exit 1
 fi
 
@@ -180,6 +192,7 @@ build_common_args
   echo "Methods: $METHODS"
   echo "Local output: $LOCAL_OUTPUT_ROOT"
   echo "Drive output: $DRIVE_OUTPUT_ROOT"
+  echo "Drive sync enabled: $USE_DRIVE"
   echo "HF cache: $HF_HOME"
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
