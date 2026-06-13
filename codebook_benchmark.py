@@ -1,0 +1,608 @@
+"""Benchmark LeanQuant and SqueezeLLM codebooks with RTN and RBVT."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import gc
+import json
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+
+from calibration_utils import load_calibration_data
+from lm_eval_runner import LMEvalHarnessRunner
+from main import (
+    collect_layer_stats,
+    cleanup_output_dir,
+    evaluate_quantized_model,
+    is_lmhead,
+)
+from quantizers import apply_rbvt
+from quantizers.base_codebook import CodebookContext
+from quantizers.codebook_factory import get_codebook
+from quantizers.sensitivity_store import SensitivityStore
+from runtime_utils import load_runtime_env, resolve_hf_token
+
+
+DEFAULT_MODEL = "meta-llama/Llama-3.1-8B"
+LM_EVAL_TASKS = [
+    "arc_challenge",
+    "arc_easy",
+    "boolq",
+    "hellaswag",
+    "lambada_openai",
+    "openbookqa",
+    "piqa",
+    "rte",
+    "winogrande",
+]
+RESULT_COLUMNS = [
+    "model",
+    "codebook",
+    "bits",
+    "method",
+    "ppl-wiki",
+    "ppl-c4",
+    "arc-c",
+    "arc-e",
+    "boolq",
+    "hellaswag",
+    "lambada",
+    "openbookqa",
+    "piqa",
+    "rte",
+    "winogrande",
+    "avg",
+]
+TASK_COLUMNS = {
+    "arc-c": ("arc_challenge", ("acc_norm,none", "acc,none")),
+    "arc-e": ("arc_easy", ("acc_norm,none", "acc,none")),
+    "boolq": ("boolq", ("acc,none",)),
+    "hellaswag": ("hellaswag", ("acc_norm,none", "acc,none")),
+    "lambada": ("lambada_openai", ("acc,none",)),
+    "openbookqa": ("openbookqa", ("acc_norm,none", "acc,none")),
+    "piqa": ("piqa", ("acc_norm,none", "acc,none")),
+    "rte": ("rte", ("acc,none",)),
+    "winogrande": ("winogrande", ("acc,none",)),
+}
+
+
+def _device_map(device: str):
+    return {"": device}
+
+
+def _model_label(model_path: str) -> str:
+    name = model_path.rstrip("/").split("/")[-1]
+    if name.lower() == "llama-3.1-8b":
+        return "Llama31"
+    return name
+
+
+def _set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _print_section(title: str):
+    print("\n" + "=" * 80)
+    print(title)
+    print("=" * 80)
+
+
+@torch.no_grad()
+def quantize_with_codebook(
+    model,
+    codebook,
+    method: str,
+    means: Dict[str, torch.Tensor],
+    variances: Dict[str, torch.Tensor],
+    sensitivity_store: SensitivityStore,
+    skip_lmhead: bool,
+    row_chunk: int,
+    rbvt_lambda: float,
+    rbvt_topk: int,
+    gap_floor: float,
+    strict_descent: bool,
+) -> dict:
+    linears: List[Tuple[str, nn.Module]] = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear)
+    ]
+    if skip_lmhead:
+        linears = [
+            (name, module)
+            for name, module in linears
+            if not is_lmhead(name)
+        ]
+    print(
+        f"Quantizing {len(linears)} Linear layers "
+        f"({'skipping' if skip_lmhead else 'including'} lm_head) | method={method}"
+    )
+
+    totals = {
+        "flips": 0,
+        "candidates": 0,
+        "boundary_kept": 0,
+        "bias_before": 0.0,
+        "bias_after": 0.0,
+        "objective_before": 0.0,
+        "objective_after": 0.0,
+        "variance_increase": 0.0,
+    }
+
+    for name, module in tqdm(linears, desc="Quantizing layers"):
+        weight = module.weight.data
+        sensitivity = sensitivity_store.get(name, weight.shape)
+        codebook.set_context(
+            CodebookContext(
+                activation_mean=means.get(name),
+                activation_variance=variances.get(name),
+                sensitivity=sensitivity,
+            )
+        )
+        quantized = codebook.quantize(weight, row_chunk=row_chunk)
+        output = quantized.W_dequant
+
+        if method == "rbvt":
+            if name not in means:
+                raise RuntimeError(f"Missing activation mean for RBVT layer {name!r}")
+            sigma = variances.get(name)
+            output, stats = apply_rbvt(
+                W_fp=weight,
+                qres=quantized,
+                mu=means[name].to(weight.device),
+                sigma_ii=sigma.to(weight.device) if sigma is not None else None,
+                rbvt_lambda=rbvt_lambda,
+                rbvt_topk=rbvt_topk if rbvt_topk > 0 else None,
+                row_chunk=row_chunk,
+                gap_floor=gap_floor,
+                strict_descent=strict_descent,
+            )
+            for key in totals:
+                totals[key] += getattr(stats, key)
+
+        module.weight.data = output.to(weight.dtype)
+        codebook.set_context(None)
+        del sensitivity, quantized, output, weight
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if method == "rbvt":
+        print(
+            "RBVT summary | "
+            f"flips={totals['flips']} | candidates={totals['candidates']} | "
+            f"boundary_kept={totals['boundary_kept']}"
+        )
+        print(
+            "RBVT objective | "
+            f"bias_before={totals['bias_before']:.6e} -> "
+            f"bias_after={totals['bias_after']:.6e} | "
+            f"objective_before={totals['objective_before']:.6e} -> "
+            f"objective_after={totals['objective_after']:.6e} | "
+            f"variance_increase={totals['variance_increase']:.6e}"
+        )
+    else:
+        print("RTN summary | plain nearest-codeword quantization completed.")
+
+    result = {
+        "method": method,
+        "num_linear_layers": len(linears),
+        "skip_lmhead": skip_lmhead,
+        "codebook": codebook.name,
+        "bits": codebook.bits,
+    }
+    if method == "rbvt":
+        result.update(totals)
+        result["rbvt_topk"] = rbvt_topk
+    return result
+
+
+def _extract_task_metric(
+    task_results: dict,
+    task_name: str,
+    metric_names: tuple[str, ...],
+) -> float | None:
+    metrics = task_results.get(task_name, {})
+    if not isinstance(metrics, dict):
+        return None
+    for metric_name in metric_names:
+        value = metrics.get(metric_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def build_result_row(summary: dict) -> dict:
+    evaluation = summary.get("evaluation", {})
+    perplexity = evaluation.get("perplexity", {})
+    lm_eval = evaluation.get("lm_eval", {})
+    run_label = summary["run_label"]
+    task_results = lm_eval.get(run_label, {}).get("summary", {})
+
+    row = {
+        "model": _model_label(summary["model_path"]),
+        "codebook": {
+            "leanquant": "LeanQuant",
+            "squeezellm": "SqueezeLLM",
+        }.get(summary["codebook"], summary["codebook"]),
+        "bits": summary["bits"],
+        "method": summary["method"].upper(),
+        "ppl-wiki": perplexity.get("WikiText-2", {}).get("perplexity"),
+        "ppl-c4": perplexity.get("C4", {}).get("perplexity"),
+    }
+    accuracies = []
+    for column, (task_name, metric_names) in TASK_COLUMNS.items():
+        value = _extract_task_metric(task_results, task_name, metric_names)
+        row[column] = value
+        if value is not None:
+            accuracies.append(value)
+    row["avg"] = (
+        sum(accuracies) / len(accuracies)
+        if len(accuracies) == len(TASK_COLUMNS)
+        else None
+    )
+    return row
+
+
+def _format_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
+
+
+def write_reports(output_root: Path, summaries: list[dict]) -> list[dict]:
+    rows = [build_result_row(summary) for summary in summaries]
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    json_path = output_root / "benchmark_results.json"
+    json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+    csv_path = output_root / "benchmark_results.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RESULT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    markdown_lines = [
+        "| " + " | ".join(RESULT_COLUMNS) + " |",
+        "|" + "|".join(["---"] * len(RESULT_COLUMNS)) + "|",
+    ]
+    for row in rows:
+        markdown_lines.append(
+            "| "
+            + " | ".join(_format_value(row.get(column)) for column in RESULT_COLUMNS)
+            + " |"
+        )
+    markdown_path = output_root / "benchmark_results.md"
+    markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
+
+    _print_section("CODEBOOK BENCHMARK RESULTS")
+    print("\t".join(RESULT_COLUMNS))
+    for row in rows:
+        print("\t".join(_format_value(row.get(column)) for column in RESULT_COLUMNS))
+    print(f"\nReports: {json_path}, {csv_path}, {markdown_path}")
+    return rows
+
+
+def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    run_id = f"{codebook_name}_{bits}bit_{method}"
+    output_dir = Path(args.output_root) / run_id
+    summary_path = output_dir / "run_summary.json"
+    started_at = time.monotonic()
+    _print_section(f"RUN {run_id}")
+    print(
+        f"Device: {args.device} | method={method} | "
+        f"codebook={codebook_name} | bits={bits} | "
+        f"skip_lmhead={args.skip_lmhead}"
+    )
+    print(
+        f"Model: {args.model_path} | output_dir={output_dir} | "
+        f"seed={args.seed}"
+    )
+    if args.resume and summary_path.exists():
+        print(f"Reusing completed run: {summary_path}")
+        print(f"Done. run={run_id} | resumed=True")
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hf_token = resolve_hf_token()
+    print(f"Loading tokenizer from {args.model_path} ...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path,
+        trust_remote_code=True,
+        token=hf_token,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    dtype = torch.bfloat16 if args.device.startswith("cuda") else torch.float32
+    print(
+        f"Loading model from {args.model_path} | "
+        f"dtype={str(dtype).replace('torch.', '')} | device={args.device} ..."
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=dtype,
+        device_map=_device_map(args.device),
+        trust_remote_code=True,
+        token=hf_token,
+    )
+    model.eval()
+    print("Model loaded and set to eval mode.")
+
+    linears = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and (not args.skip_lmhead or not is_lmhead(name))
+    ]
+    print(
+        f"Loading calibration data | dataset={args.calib_dataset} | "
+        f"samples={args.n_calib} | max_length={args.max_length} ..."
+    )
+    calibration_texts = load_calibration_data(
+        dataset_name=args.calib_dataset,
+        tokenizer=tokenizer,
+        n_samples=args.n_calib,
+        seqlen=args.max_length,
+        seed=args.seed,
+    )
+    print(f"Loaded {len(calibration_texts)} calibration samples.")
+    means, variances = collect_layer_stats(
+        model=model,
+        tokenizer=tokenizer,
+        linears=linears,
+        calib_texts=calibration_texts,
+        device=args.device,
+        n_calib=args.n_calib,
+        max_length=args.max_length,
+        want_var=True,
+    )
+    print(
+        f"Collected activation statistics for {len(means)}/{len(linears)} layers | "
+        f"variances={len(variances)}"
+    )
+
+    codebook = get_codebook(
+        name=codebook_name,
+        bits=bits,
+        group_size=args.group_size,
+        n_iters=args.kmeans_iters,
+        fit_row_chunk=args.fit_row_chunk,
+        leanquant_exponent=args.leanquant_exponent,
+    )
+    uses_sensitivity = codebook_name == "squeezellm"
+    sensitivity_store = SensitivityStore(
+        args.squeezellm_sensitivity if uses_sensitivity else None
+    )
+    sensitivity_mode = sensitivity_store.mode if uses_sensitivity else "not_used"
+    print(
+        f"Loaded quantizer: {codebook} | sensitivity={sensitivity_mode}"
+    )
+    _print_section(f"QUANTIZATION | {run_id}")
+    quantization = quantize_with_codebook(
+        model=model,
+        codebook=codebook,
+        method=method,
+        means=means,
+        variances=variances,
+        sensitivity_store=sensitivity_store,
+        skip_lmhead=args.skip_lmhead,
+        row_chunk=args.row_chunk,
+        rbvt_lambda=args.rbvt_lambda,
+        rbvt_topk=args.rbvt_topk,
+        gap_floor=args.gap_floor,
+        strict_descent=args.strict_descent,
+    )
+
+    print(f"Saving to {output_dir} ...")
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print("Quantized model and tokenizer saved.")
+    del model, means, variances, calibration_texts
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    run_label = method.upper()
+    _print_section(f"PERPLEXITY EVALUATION | {run_id}")
+    perplexity = evaluate_quantized_model(
+        model_path=str(output_dir),
+        model_name=run_label,
+        eval_device=args.device,
+        eval_seed=args.seed,
+        eval_stride=args.eval_stride,
+        eval_max_length=args.eval_max_length,
+        eval_cache_dir=args.eval_cache_dir,
+        eval_samples=args.eval_samples,
+        hf_token=hf_token,
+    )
+    if args.include_lm_eval:
+        _print_section(f"LM-EVAL | {run_id}")
+        print(
+            f"Tasks: {', '.join(LM_EVAL_TASKS)} | "
+            f"batch_size={args.lm_eval_batch_size} | "
+            f"num_fewshot={args.lm_eval_num_fewshot} | limit={args.lm_eval_limit}"
+        )
+        lm_runner = LMEvalHarnessRunner(
+            tasks=LM_EVAL_TASKS,
+            device=args.device,
+            batch_size=args.lm_eval_batch_size,
+            num_fewshot=args.lm_eval_num_fewshot,
+            limit=args.lm_eval_limit,
+            output_dir=args.lm_eval_output_dir,
+            run_name=f"{datetime.now():%Y%m%d-%H%M%S}_{run_id}",
+            hf_token=hf_token,
+        )
+        lm_eval = lm_runner.run({run_label: str(output_dir)})
+    else:
+        print("lm-eval disabled.")
+        lm_eval = {}
+
+    summary = {
+        "model_path": args.model_path,
+        "output_dir": str(output_dir),
+        "run_label": run_label,
+        "codebook": codebook_name,
+        "bits": bits,
+        "method": method,
+        "sensitivity_mode": sensitivity_mode,
+        "quantization": quantization,
+        "calibration": {
+            "dataset": args.calib_dataset,
+            "n_calib": args.n_calib,
+            "max_length": args.max_length,
+            "seed": args.seed,
+        },
+        "evaluation": {
+            "perplexity": perplexity,
+            "lm_eval": lm_eval,
+            "tasks": LM_EVAL_TASKS if args.include_lm_eval else [],
+        },
+        "args": vars(args),
+    }
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"Saved run summary to {summary_path}")
+    if not args.keep_model:
+        cleanup_output_dir(str(output_dir))
+    elapsed = time.monotonic() - started_at
+    print(f"Done. run={run_id} | elapsed={elapsed:.1f}s")
+    return summary
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="LeanQuant/SqueezeLLM codebook benchmark for RTN and RBVT"
+    )
+    parser.add_argument("--model-path", default=DEFAULT_MODEL)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--output-root", default="./outputs/codebook_benchmark")
+    parser.add_argument(
+        "--codebooks",
+        nargs="+",
+        choices=["leanquant", "squeezellm"],
+        default=["leanquant", "squeezellm"],
+    )
+    parser.add_argument("--bits", nargs="+", type=int, choices=[3, 4], default=[3, 4])
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=["rtn", "rbvt"],
+        default=["rtn", "rbvt"],
+    )
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--keep-model", action="store_true")
+
+    parser.add_argument("--skip-lmhead", action="store_true", default=True)
+    parser.add_argument("--no-skip-lmhead", dest="skip_lmhead", action="store_false")
+    parser.add_argument("--calib-dataset", choices=["c4", "wikitext2"], default="c4")
+    parser.add_argument("--n-calib", type=int, default=128)
+    parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument("--group-size", type=int, default=-1)
+    parser.add_argument("--kmeans-iters", type=int, default=20)
+    parser.add_argument("--fit-row-chunk", type=int, default=32)
+    parser.add_argument("--row-chunk", type=int, default=32)
+    parser.add_argument("--leanquant-exponent", type=float, default=4.0)
+    parser.add_argument(
+        "--squeezellm-sensitivity",
+        default=None,
+        help="Optional Fisher gradient-square .safetensors/.pt checkpoint",
+    )
+
+    parser.add_argument("--rbvt-lambda", type=float, default=1.0)
+    parser.add_argument("--rbvt-topk", type=int, default=0)
+    parser.add_argument("--gap-floor", type=float, default=1e-8)
+    parser.add_argument("--strict-descent", action="store_true", default=True)
+    parser.add_argument(
+        "--allow-overshoot",
+        dest="strict_descent",
+        action="store_false",
+    )
+
+    parser.add_argument("--eval-stride", type=int, default=512)
+    parser.add_argument("--eval-max-length", type=int, default=2048)
+    parser.add_argument("--eval-samples", type=int, default=2000)
+    parser.add_argument("--eval-cache-dir", default="./dataset_cache")
+    parser.add_argument("--include-lm-eval", action="store_true", default=True)
+    parser.add_argument("--no-lm-eval", dest="include_lm_eval", action="store_false")
+    parser.add_argument("--lm-eval-batch-size", default="auto")
+    parser.add_argument("--lm-eval-num-fewshot", type=int, default=None)
+    parser.add_argument("--lm-eval-limit", type=float, default=None)
+    parser.add_argument("--lm-eval-output-dir", default="./outputs/lm_eval_codebooks")
+    return parser
+
+
+def main():
+    load_runtime_env()
+    args = build_parser().parse_args()
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{args.device} was requested, but CUDA is unavailable. "
+            "Llama-3.1-8B full evaluation requires a CUDA machine."
+        )
+    if args.rbvt_lambda < 0.0:
+        raise ValueError("--rbvt-lambda must be non-negative")
+
+    _set_seed(args.seed)
+    total_runs = len(args.codebooks) * len(args.bits) * len(args.methods)
+    _print_section("RBVTQUANT CODEBOOK BENCHMARK")
+    print(
+        f"Model: {args.model_path} | Device: {args.device} | "
+        f"Runs: {total_runs} | seed={args.seed}"
+    )
+    print(
+        f"Codebooks: {', '.join(args.codebooks)} | "
+        f"bits={args.bits} | methods={args.methods}"
+    )
+    print(
+        f"Calibration: dataset={args.calib_dataset}, samples={args.n_calib}, "
+        f"max_length={args.max_length}"
+    )
+    print(
+        f"Evaluation: stride={args.eval_stride}, "
+        f"max_length={args.eval_max_length}, samples={args.eval_samples}, "
+        f"lm_eval={args.include_lm_eval}"
+    )
+
+    benchmark_started_at = time.monotonic()
+    summaries = []
+    run_index = 0
+    for codebook_name in args.codebooks:
+        for bits in args.bits:
+            for method in args.methods:
+                run_index += 1
+                print(
+                    f"\nStarting run {run_index}/{total_runs}: "
+                    f"{codebook_name} {bits}-bit {method.upper()}"
+                )
+                summaries.append(run_one(args, codebook_name, bits, method))
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+    write_reports(Path(args.output_root), summaries)
+    elapsed = time.monotonic() - benchmark_started_at
+    print(f"Done. completed_runs={len(summaries)}/{total_runs} | elapsed={elapsed:.1f}s")
+
+
+if __name__ == "__main__":
+    main()
