@@ -13,6 +13,11 @@ cd "$ROOT_DIR"
 
 RUN_SETUP="${RUN_SETUP:-1}"
 RUN_TESTS="${RUN_TESTS:-1}"
+RUN_SQUEEZE_FIRST="${RUN_SQUEEZE_FIRST:-1}"
+RUN_LEANQUANT_AFTER="${RUN_LEANQUANT_AFTER:-1}"
+
+SQUEEZE_CODEBOOKS="${SQUEEZE_CODEBOOKS:-squeezellm}"
+LEANQUANT_CODEBOOKS="${LEANQUANT_CODEBOOKS:-leanquant}"
 
 echo "=== RBVTQuant Colab end-to-end runner ==="
 echo "Repository: $ROOT_DIR"
@@ -26,4 +31,16 @@ if [ "$RUN_TESTS" = "1" ]; then
 fi
 
 # run_colab_codebooks.sh performs preflight checks by default.
-bash bash/run_colab_codebooks.sh
+if [ "$RUN_SQUEEZE_FIRST" = "1" ]; then
+  echo
+  echo "=== Phase 1: SqueezeLLM runs ==="
+  CODEBOOKS="$SQUEEZE_CODEBOOKS" \
+  bash bash/run_colab_codebooks.sh
+fi
+
+if [ "$RUN_LEANQUANT_AFTER" = "1" ]; then
+  echo
+  echo "=== Phase 2: LeanQuant runs ==="
+  CODEBOOKS="$LEANQUANT_CODEBOOKS" \
+  bash bash/run_colab_codebooks.sh
+fi
