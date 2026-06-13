@@ -11,7 +11,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 MODEL="${MODEL:-mistralai/Mistral-7B-v0.3}"
-DEVICE="${DEVICE:-cuda:1}"
+DEVICE="${DEVICE:-cuda:0}"
 RBVT_TOPK="${RBVT_TOPK:-0}"
 
 QUANTIZERS=(

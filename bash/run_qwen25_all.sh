@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # End-to-end runs for the Qwen2.5 models:
-# 1. FLOAT baseline on cuda:0
-# 2. RTN quantized runs on cuda:0
-# 3. RBVT quantized runs on cuda:0
+# 1. FLOAT baseline on cuda:1
+# 2. RTN quantized runs on cuda:1
+# 3. RBVT quantized runs on cuda:1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -13,9 +13,9 @@ USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 
-FLOAT_DEVICE="${FLOAT_DEVICE:-cuda:0}"
-RTN_DEVICE="${RTN_DEVICE:-cuda:0}"
-RBVT_DEVICE="${RBVT_DEVICE:-cuda:0}"
+FLOAT_DEVICE="${FLOAT_DEVICE:-cuda:1}"
+RTN_DEVICE="${RTN_DEVICE:-cuda:1}"
+RBVT_DEVICE="${RBVT_DEVICE:-cuda:1}"
 
 MODELS=(
   "Qwen/Qwen2.5-7B"
