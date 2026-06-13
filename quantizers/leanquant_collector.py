@@ -110,6 +110,10 @@ def collect_leanquant_codebooks(
     if original_use_cache is not None:
         model.config.use_cache = False
     model.eval()
+    print(
+        f"Starting LeanQuant shadow pass | layers={len(layers)} | "
+        f"samples={len(token_samples)}"
+    )
 
     captured_inputs: list[torch.Tensor] = []
     capture_state: dict = {}
@@ -129,15 +133,23 @@ def collect_leanquant_codebooks(
             f"Captured {len(captured_inputs)} LeanQuant inputs for "
             f"{len(token_samples)} samples"
         )
+    print("Captured LeanQuant inputs; starting layer-wise Hessian/codebook collection ...")
     layer_kwargs = capture_state.get("kwargs", {})
     inps = captured_inputs
 
-    for layer_index, layer in enumerate(layers):
+    for layer_index, layer in enumerate(
+        tqdm(layers, desc="LeanQuant layers", unit="layer")
+    ):
         print(f"LeanQuant shadow layer {layer_index + 1}/{len(layers)}")
         subsets = _get_subsets(layer)
         outs: list[torch.Tensor] = []
 
-        for names in subsets:
+        for names in tqdm(
+            subsets,
+            desc=f"Layer {layer_index + 1}: subsets",
+            unit="subset",
+            leave=False,
+        ):
             accumulators = {
                 name: _HessianAccumulator(
                     layer.get_submodule(name).weight.shape[1],
@@ -156,7 +168,12 @@ def collect_leanquant_codebooks(
                 handles.append(module.register_forward_hook(add_batch))
 
             try:
-                for sample in inps:
+                for sample in tqdm(
+                    inps,
+                    desc=f"Layer {layer_index + 1}: Hessian samples",
+                    unit="sample",
+                    leave=False,
+                ):
                     _forward_layer(layer, sample, layer_kwargs)
             finally:
                 for handle in handles:
@@ -175,7 +192,12 @@ def collect_leanquant_codebooks(
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-        for sample in inps:
+        for sample in tqdm(
+            inps,
+            desc=f"Layer {layer_index + 1}: propagate outputs",
+            unit="sample",
+            leave=False,
+        ):
             outs.append(_forward_layer(layer, sample, layer_kwargs).detach())
         inps = outs
         if torch.cuda.is_available():

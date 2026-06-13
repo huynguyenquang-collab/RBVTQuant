@@ -396,6 +396,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
                 seed=args.seed,
                 cache_dir=cache_root / "calibration",
             )
+            print("Building LeanQuant codebooks (shadow pass) ...")
             collect_leanquant_codebooks(
                 model=model,
                 token_samples=leanquant_samples,
