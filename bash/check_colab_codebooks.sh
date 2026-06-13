@@ -36,6 +36,7 @@ required = [
     "datasets",
     "accelerate",
     "safetensors",
+    "sklearn",
     "lm_eval",
 ]
 
@@ -130,9 +131,13 @@ fi
 "$PYTHON_BIN" -m py_compile \
   codebook_benchmark.py \
   quantizers/base_codebook.py \
+  quantizers/codebook_store.py \
   quantizers/codebook_factory.py \
+  quantizers/leanquant_collector.py \
   quantizers/leanquant_codebook.py \
   quantizers/sensitivity_store.py \
-  quantizers/squeezellm_codebook.py
+  quantizers/squeezellm_collector.py \
+  quantizers/squeezellm_codebook.py \
+  quantizers/upstream_calibration.py
 
 echo "Preflight passed."

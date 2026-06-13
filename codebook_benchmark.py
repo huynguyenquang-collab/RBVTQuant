@@ -27,9 +27,13 @@ from main import (
 )
 from quantizers import apply_rbvt
 from quantizers.base_codebook import CodebookContext
+from quantizers.codebook_store import CodebookStore
 from quantizers.codebook_factory import get_codebook
+from quantizers.leanquant_collector import collect_leanquant_codebooks
 from quantizers.sensitivity_store import SensitivityStore
-from runtime_utils import load_runtime_env, resolve_hf_token
+from quantizers.squeezellm_collector import collect_squeezellm_fisher
+from quantizers.upstream_calibration import load_upstream_c4_tokens
+from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
 
 
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B"
@@ -114,6 +118,7 @@ def quantize_with_codebook(
     rbvt_topk: int,
     gap_floor: float,
     strict_descent: bool,
+    codebook_store: CodebookStore,
 ) -> dict:
     linears: List[Tuple[str, nn.Module]] = [
         (name, module)
@@ -144,15 +149,23 @@ def quantize_with_codebook(
 
     for name, module in tqdm(linears, desc="Quantizing layers"):
         weight = module.weight.data
-        sensitivity = sensitivity_store.get(name, weight.shape)
+        cached_centers = codebook_store.get(name)
+        sensitivity = (
+            sensitivity_store.get(name, weight.shape)
+            if cached_centers is None and codebook.name.startswith("squeezellm")
+            else None
+        )
         codebook.set_context(
             CodebookContext(
                 activation_mean=means.get(name),
                 activation_variance=variances.get(name),
                 sensitivity=sensitivity,
+                precomputed_centers=cached_centers,
             )
         )
         quantized = codebook.quantize(weight, row_chunk=row_chunk)
+        if cached_centers is None:
+            codebook_store.put(name, quantized.block_codebooks)
         output = quantized.W_dequant
 
         if method == "rbvt":
@@ -179,6 +192,7 @@ def quantize_with_codebook(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    codebook_store.mark_complete()
     if method == "rbvt":
         print(
             "RBVT summary | "
@@ -325,6 +339,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     print(f"Loading tokenizer from {args.model_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path,
+        use_fast=False,
         trust_remote_code=True,
         token=hf_token,
     )
@@ -336,47 +351,18 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         f"Loading model from {args.model_path} | "
         f"dtype={str(dtype).replace('torch.', '')} | device={args.device} ..."
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=dtype,
-        device_map=_device_map(args.device),
-        trust_remote_code=True,
-        token=hf_token,
-    )
+    def load_model():
+        return AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            torch_dtype=dtype,
+            device_map=_device_map(args.device),
+            trust_remote_code=True,
+            token=hf_token,
+        )
+
+    model = load_model()
     model.eval()
     print("Model loaded and set to eval mode.")
-
-    linears = [
-        (name, module)
-        for name, module in model.named_modules()
-        if isinstance(module, nn.Linear) and (not args.skip_lmhead or not is_lmhead(name))
-    ]
-    print(
-        f"Loading calibration data | dataset={args.calib_dataset} | "
-        f"samples={args.n_calib} | max_length={args.max_length} ..."
-    )
-    calibration_texts = load_calibration_data(
-        dataset_name=args.calib_dataset,
-        tokenizer=tokenizer,
-        n_samples=args.n_calib,
-        seqlen=args.max_length,
-        seed=args.seed,
-    )
-    print(f"Loaded {len(calibration_texts)} calibration samples.")
-    means, variances = collect_layer_stats(
-        model=model,
-        tokenizer=tokenizer,
-        linears=linears,
-        calib_texts=calibration_texts,
-        device=args.device,
-        n_calib=args.n_calib,
-        max_length=args.max_length,
-        want_var=True,
-    )
-    print(
-        f"Collected activation statistics for {len(means)}/{len(linears)} layers | "
-        f"variances={len(variances)}"
-    )
 
     codebook = get_codebook(
         name=codebook_name,
@@ -385,15 +371,132 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         n_iters=args.kmeans_iters,
         fit_row_chunk=args.fit_row_chunk,
         leanquant_exponent=args.leanquant_exponent,
+        leanquant_percdamp=args.leanquant_percdamp,
+        leanquant_act_order=args.leanquant_act_order,
+        kmeans_seed=args.kmeans_seed,
     )
-    uses_sensitivity = codebook_name == "squeezellm"
-    sensitivity_store = SensitivityStore(
-        args.squeezellm_sensitivity if uses_sensitivity else None
+    cache_root = Path(args.statistics_cache_dir or Path(args.output_root) / "_statistics")
+    model_slug = build_model_slug(args.model_path)
+    codebook_store = CodebookStore(
+        cache_root / "codebooks" / model_slug / f"{codebook_name}_{bits}bit"
     )
-    sensitivity_mode = sensitivity_store.mode if uses_sensitivity else "not_used"
+
+    sensitivity_path = None
+    if codebook_name == "leanquant":
+        if not codebook_store.complete:
+            print("Preparing upstream LeanQuant calibration tokens ...")
+            leanquant_samples = load_upstream_c4_tokens(
+                tokenizer=tokenizer,
+                n_samples=args.n_calib,
+                seqlen=args.max_length,
+                seed=args.seed,
+                cache_dir=cache_root / "calibration",
+            )
+            collect_leanquant_codebooks(
+                model=model,
+                token_samples=leanquant_samples,
+                store=codebook_store,
+                codebook=codebook,
+                device=args.device,
+            )
+            del model, leanquant_samples
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("Reloading the original FP model after LeanQuant shadow pass ...")
+            model = load_model()
+            model.eval()
+        sensitivity_mode = "not_used"
+    else:
+        sensitivity_path = args.squeezellm_sensitivity
+        if sensitivity_path is None:
+            fisher_path = (
+                cache_root
+                / "fisher"
+                / model_slug
+                / (
+                    f"c4_n{args.squeezellm_fisher_samples}"
+                    f"_len{args.squeezellm_fisher_length}_seed0"
+                )
+            )
+            fisher_manifest = fisher_path / "manifest.json"
+            fisher_complete = False
+            if fisher_manifest.exists():
+                fisher_complete = json.loads(
+                    fisher_manifest.read_text(encoding="utf-8")
+                ).get("complete", False)
+            if not fisher_complete:
+                print("Preparing upstream SqueezeLLM Fisher calibration tokens ...")
+                fisher_samples = load_upstream_c4_tokens(
+                    tokenizer=tokenizer,
+                    n_samples=args.squeezellm_fisher_samples,
+                    seqlen=args.squeezellm_fisher_length,
+                    seed=0,
+                    cache_dir=cache_root / "calibration",
+                )
+                collect_squeezellm_fisher(
+                    model=model,
+                    token_samples=fisher_samples,
+                    output_dir=fisher_path,
+                    device=args.device,
+                )
+                del fisher_samples
+            sensitivity_path = str(fisher_path)
+        sensitivity_mode = "fisher_checkpoint"
+
+    sensitivity_store = SensitivityStore(sensitivity_path)
+    if codebook_name == "squeezellm":
+        expected_store_metadata = {
+            "algorithm": "squeezellm_dense_fisher_kmeans",
+            "model": args.model_path,
+            "bits": bits,
+            "fisher": str(sensitivity_path),
+        }
+        if codebook_store.complete:
+            codebook_store.validate(expected_store_metadata)
+        else:
+            codebook_store.initialize(expected_store_metadata)
     print(
-        f"Loaded quantizer: {codebook} | sensitivity={sensitivity_mode}"
+        f"Loaded quantizer: {codebook} | sensitivity={sensitivity_mode} | "
+        f"codebook_cache={codebook_store.root}"
     )
+
+    means: Dict[str, torch.Tensor] = {}
+    variances: Dict[str, torch.Tensor] = {}
+    calibration_texts = []
+    if method == "rbvt":
+        linears = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+            and (not args.skip_lmhead or not is_lmhead(name))
+        ]
+        print(
+            f"Loading RBVT calibration data | dataset={args.calib_dataset} | "
+            f"samples={args.n_calib} | max_length={args.max_length} ..."
+        )
+        calibration_texts = load_calibration_data(
+            dataset_name=args.calib_dataset,
+            tokenizer=tokenizer,
+            n_samples=args.n_calib,
+            seqlen=args.max_length,
+            seed=args.seed,
+        )
+        means, variances = collect_layer_stats(
+            model=model,
+            tokenizer=tokenizer,
+            linears=linears,
+            calib_texts=calibration_texts,
+            device=args.device,
+            n_calib=args.n_calib,
+            max_length=args.max_length,
+            want_var=args.rbvt_lambda > 0.0,
+        )
+        print(
+            f"Collected RBVT activation statistics for {len(means)}/{len(linears)} "
+            f"layers | variances={len(variances)}"
+        )
+
     _print_section(f"QUANTIZATION | {run_id}")
     quantization = quantize_with_codebook(
         model=model,
@@ -408,6 +511,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         rbvt_topk=args.rbvt_topk,
         gap_floor=args.gap_floor,
         strict_descent=args.strict_descent,
+        codebook_store=codebook_store,
     )
 
     print(f"Saving to {output_dir} ...")
@@ -519,15 +623,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--group-size", type=int, default=-1)
-    parser.add_argument("--kmeans-iters", type=int, default=20)
-    parser.add_argument("--fit-row-chunk", type=int, default=32)
-    parser.add_argument("--row-chunk", type=int, default=32)
+    parser.add_argument(
+        "--kmeans-iters",
+        type=int,
+        default=20,
+        help="Compatibility option; upstream LeanQuant/SqueezeLLM use 100/50",
+    )
+    parser.add_argument(
+        "--fit-row-chunk",
+        type=int,
+        default=32,
+        help="Maximum rows fitted together when learning codebook centers",
+    )
+    parser.add_argument(
+        "--row-chunk",
+        type=int,
+        default=1024,
+        help="General quantization/RBVT row chunk; matches main.py by default",
+    )
     parser.add_argument("--leanquant-exponent", type=float, default=4.0)
+    parser.add_argument("--leanquant-percdamp", type=float, default=0.1)
+    parser.add_argument("--kmeans-seed", type=int, default=0)
+    parser.add_argument(
+        "--leanquant-act-order",
+        dest="leanquant_act_order",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no-leanquant-act-order",
+        dest="leanquant_act_order",
+        action="store_false",
+    )
     parser.add_argument(
         "--squeezellm-sensitivity",
         default=None,
-        help="Optional Fisher gradient-square .safetensors/.pt checkpoint",
+        help="Existing Fisher checkpoint; omitted means collect it upstream-style",
     )
+    parser.add_argument("--squeezellm-fisher-samples", type=int, default=100)
+    parser.add_argument("--squeezellm-fisher-length", type=int, default=512)
+    parser.add_argument("--statistics-cache-dir", default=None)
 
     parser.add_argument("--rbvt-lambda", type=float, default=1.0)
     parser.add_argument("--rbvt-topk", type=int, default=0)
@@ -562,6 +697,15 @@ def main():
         )
     if args.rbvt_lambda < 0.0:
         raise ValueError("--rbvt-lambda must be non-negative")
+    if args.group_size != -1:
+        raise ValueError(
+            "Exact upstream LeanQuant/SqueezeLLM codebooks require --group-size=-1"
+        )
+    if not args.skip_lmhead:
+        raise ValueError(
+            "LeanQuant and SqueezeLLM upstream flows do not quantize lm_head; "
+            "--no-skip-lmhead is incompatible with exact mode"
+        )
 
     _set_seed(args.seed)
     total_runs = len(args.codebooks) * len(args.bits) * len(args.methods)
@@ -577,6 +721,13 @@ def main():
     print(
         f"Calibration: dataset={args.calib_dataset}, samples={args.n_calib}, "
         f"max_length={args.max_length}"
+    )
+    print(
+        "Upstream codebook statistics: "
+        f"LeanQuant=C4/{args.n_calib}x{args.max_length}, "
+        "true-sequential full Hessian; "
+        f"SqueezeLLM=C4/{args.squeezellm_fisher_samples}x"
+        f"{args.squeezellm_fisher_length}, Fisher seed=0"
     )
     print(
         f"Evaluation: stride={args.eval_stride}, "

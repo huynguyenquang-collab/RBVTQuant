@@ -9,3 +9,4 @@ safetensors
 lm-eval
 wandb
 python-dotenv
+scikit-learn==1.5.2

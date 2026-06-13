@@ -15,6 +15,7 @@ class SensitivityStore:
     def __init__(self, path: str | Path | None):
         self.path = Path(path).expanduser() if path else None
         self._weight_map: dict[str, str] = {}
+        self._tensor_map: dict[str, str] = {}
         self._single_safetensors: Path | None = None
         self._torch_payload: Any = None
 
@@ -24,6 +25,13 @@ class SensitivityStore:
             raise FileNotFoundError(f"Sensitivity checkpoint not found: {self.path}")
 
         if self.path.is_dir():
+            manifest_path = self.path / "manifest.json"
+            if manifest_path.exists():
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not payload.get("complete", False):
+                    raise ValueError(f"Incomplete Fisher cache: {self.path}")
+                self._tensor_map = dict(payload.get("layers", {}))
+                return
             indexes = sorted(self.path.glob("*.safetensors.index.json"))
             if indexes:
                 payload = json.loads(indexes[0].read_text(encoding="utf-8"))
@@ -54,7 +62,7 @@ class SensitivityStore:
 
     @property
     def mode(self) -> str:
-        return "fisher_checkpoint" if self.path is not None else "activation_fisher_proxy"
+        return "fisher_checkpoint" if self.path is not None else "missing"
 
     @staticmethod
     def _candidate_keys(layer_name: str) -> tuple[str, ...]:
@@ -87,7 +95,21 @@ class SensitivityStore:
         candidates = self._candidate_keys(layer_name)
         tensor: torch.Tensor | None = None
 
-        if self._weight_map:
+        if self._tensor_map:
+            for key in candidates:
+                filename = self._tensor_map.get(key)
+                if filename is not None:
+                    file_path = self.path / filename
+                    try:
+                        tensor = torch.load(
+                            file_path,
+                            map_location="cpu",
+                            weights_only=True,
+                        )
+                    except TypeError:
+                        tensor = torch.load(file_path, map_location="cpu")
+                    break
+        elif self._weight_map:
             for key in candidates:
                 shard = self._weight_map.get(key)
                 if shard is not None:

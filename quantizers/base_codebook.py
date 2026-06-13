@@ -18,6 +18,8 @@ class CodebookContext:
     activation_mean: Optional[torch.Tensor] = None
     activation_variance: Optional[torch.Tensor] = None
     sensitivity: Optional[torch.Tensor] = None
+    hessian: Optional[torch.Tensor] = None
+    precomputed_centers: Optional[torch.Tensor] = None
 
     def activation_second_moment(
         self,
@@ -163,6 +165,25 @@ class BaseCodebook(BaseQuantizer, ABC):
 
         return centers
 
+    def fit_centers(
+        self,
+        values: torch.Tensor,
+        context: CodebookContext,
+        row_start: int,
+        row_end: int,
+        column_start: int,
+        column_end: int,
+    ) -> torch.Tensor:
+        weights = self.sample_weights(
+            values=values,
+            context=context,
+            row_start=row_start,
+            row_end=row_end,
+            column_start=column_start,
+            column_end=column_end,
+        )
+        return self._fit_weighted_kmeans(values, weights)
+
     @torch.no_grad()
     def quantize(self, W: torch.Tensor, row_chunk: int = 1024) -> QuantResult:
         if W.ndim != 2:
@@ -173,6 +194,15 @@ class BaseCodebook(BaseQuantizer, ABC):
         block_size = in_features if self.group_size == -1 else self.group_size
         n_blocks = (in_features + block_size - 1) // block_size
         effective_row_chunk = min(row_chunk, self.fit_row_chunk)
+        precomputed = self.context.precomputed_centers
+        if precomputed is not None:
+            expected = (out_features, n_blocks, self.num_levels)
+            if tuple(precomputed.shape) != expected:
+                raise ValueError(
+                    f"Precomputed centers have shape {tuple(precomputed.shape)}, "
+                    f"expected {expected}"
+                )
+            precomputed = precomputed.to(device=device, dtype=torch.float32)
 
         W_dequant = torch.empty_like(W)
         indices = torch.empty(
@@ -203,15 +233,17 @@ class BaseCodebook(BaseQuantizer, ABC):
                 column_start = block_index * block_size
                 column_end = min(column_start + block_size, in_features)
                 values = rows[:, column_start:column_end]
-                weights = self.sample_weights(
-                    values=values,
-                    context=self.context,
-                    row_start=row_start,
-                    row_end=row_end,
-                    column_start=column_start,
-                    column_end=column_end,
-                )
-                centers = self._fit_weighted_kmeans(values, weights)
+                if precomputed is None:
+                    centers = self.fit_centers(
+                        values=values,
+                        context=self.context,
+                        row_start=row_start,
+                        row_end=row_end,
+                        column_start=column_start,
+                        column_end=column_end,
+                    )
+                else:
+                    centers = precomputed[row_start:row_end, block_index]
 
                 distances = (values.unsqueeze(-1) - centers.unsqueeze(1)).abs()
                 block_indices = distances.argmin(dim=-1)
