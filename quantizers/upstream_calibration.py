@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 
 
 def load_upstream_c4_tokens(
@@ -25,8 +26,11 @@ def load_upstream_c4_tokens(
         f"upstream_c4_n{n_samples}_len{seqlen}_seed{seed}.pkl"
     )
     if cache_path.exists():
-        with cache_path.open("rb") as handle:
-            return pickle.load(handle)
+        with tqdm(total=1, desc="Loading cached upstream tokens", unit="file") as pbar:
+            with cache_path.open("rb") as handle:
+                cached_samples = pickle.load(handle)
+            pbar.update(1)
+        return cached_samples
 
     dataset = load_dataset(
         "allenai/c4",
@@ -36,7 +40,7 @@ def load_upstream_c4_tokens(
     )
     random.seed(seed)
     samples = []
-    for _ in range(n_samples):
+    for _ in tqdm(range(n_samples), desc="Sampling upstream C4 tokens"):
         while True:
             document_index = random.randint(0, len(dataset) - 1)
             encoded = tokenizer(dataset[document_index]["text"], return_tensors="pt")
@@ -45,8 +49,10 @@ def load_upstream_c4_tokens(
         start = random.randint(0, encoded.input_ids.shape[1] - seqlen - 1)
         samples.append(encoded.input_ids[:, start : start + seqlen].cpu())
 
-    with cache_path.open("wb") as handle:
-        pickle.dump(samples, handle)
+    with tqdm(total=1, desc="Saving upstream token cache", unit="file") as pbar:
+        with cache_path.open("wb") as handle:
+            pickle.dump(samples, handle)
+        pbar.update(1)
     return samples
 
 

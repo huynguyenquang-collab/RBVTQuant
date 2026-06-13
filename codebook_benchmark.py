@@ -337,12 +337,14 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     hf_token = resolve_hf_token()
     print(f"Loading tokenizer from {args.model_path} ...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        use_fast=False,
-        trust_remote_code=True,
-        token=hf_token,
-    )
+    with tqdm(total=1, desc="Loading tokenizer", unit="step") as pbar:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_path,
+            use_fast=False,
+            trust_remote_code=True,
+            token=hf_token,
+        )
+        pbar.update(1)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -360,7 +362,9 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
             token=hf_token,
         )
 
-    model = load_model()
+    with tqdm(total=1, desc="Loading model", unit="step") as pbar:
+        model = load_model()
+        pbar.update(1)
     model.eval()
     print("Model loaded and set to eval mode.")
 
@@ -404,7 +408,9 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             print("Reloading the original FP model after LeanQuant shadow pass ...")
-            model = load_model()
+            with tqdm(total=1, desc="Reloading FP model", unit="step") as pbar:
+                model = load_model()
+                pbar.update(1)
             model.eval()
         sensitivity_mode = "not_used"
     else:
