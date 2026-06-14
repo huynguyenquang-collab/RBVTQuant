@@ -28,6 +28,7 @@ from main import (
 from quantizers import apply_rbvt
 from quantizers.base_codebook import CodebookContext
 from quantizers.codebook_store import CodebookStore
+from quantizers.hessian_store import HessianStore
 from quantizers.codebook_factory import get_codebook
 from quantizers.leanquant_collector import collect_leanquant_codebooks
 from quantizers.sensitivity_store import SensitivityStore
@@ -388,6 +389,9 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     codebook_store = CodebookStore(
         cache_root / "codebooks" / model_slug / f"{codebook_name}_{bits}bit"
     )
+    hessian_store = HessianStore(
+        cache_root / "hessian" / model_slug / f"{codebook_name}_shared"
+    )
 
     sensitivity_path = None
     if codebook_name == "leanquant":
@@ -405,6 +409,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
                 model=model,
                 token_samples=leanquant_samples,
                 store=codebook_store,
+                hessian_store=hessian_store,
                 codebook=codebook,
                 device=args.device,
             )

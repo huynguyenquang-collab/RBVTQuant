@@ -10,6 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from .codebook_store import CodebookStore
+from .hessian_store import HessianStore
 from .leanquant_codebook import LeanQuantCodebook
 
 
@@ -76,6 +77,7 @@ def collect_leanquant_codebooks(
     model,
     token_samples: list[torch.Tensor],
     store: CodebookStore,
+    hessian_store: HessianStore,
     codebook: LeanQuantCodebook,
     device: str,
 ):
@@ -102,8 +104,18 @@ def collect_leanquant_codebooks(
                 f"LeanQuant cache metadata mismatch: {store.metadata} != {metadata}"
             )
         print(f"Reusing LeanQuant codebook cache: {store.root}")
+    if hessian_store.complete:
+        if hessian_store.metadata != metadata:
+            raise ValueError(
+                f"LeanQuant Hessian cache metadata mismatch: {hessian_store.metadata} != {metadata}"
+            )
+        print(f"Reusing LeanQuant Hessian cache: {hessian_store.root}")
+    if store.complete and hessian_store.complete:
         return
-    store.initialize(metadata)
+    if not store.complete:
+        store.initialize(metadata)
+    if not hessian_store.complete:
+        hessian_store.initialize(metadata)
 
     layers = model.model.layers
     original_use_cache = getattr(model.config, "use_cache", None)
@@ -150,45 +162,39 @@ def collect_leanquant_codebooks(
             unit="subset",
             leave=False,
         ):
-            accumulators = {
-                name: _HessianAccumulator(
-                    layer.get_submodule(name).weight.shape[1],
-                    layer.get_submodule(name).weight.device,
-                )
-                for name in names
-            }
-            handles = []
-            for name in names:
-                accumulator = accumulators[name]
-                module = layer.get_submodule(name)
-
-                def add_batch(_module, inputs, _output, target=accumulator):
-                    target.add_batch(inputs[0].detach())
-
-                handles.append(module.register_forward_hook(add_batch))
-
-            try:
-                for sample in tqdm(
-                    inps,
-                    desc=f"Layer {layer_index + 1}: Hessian samples",
-                    unit="sample",
-                    leave=False,
-                ):
-                    _forward_layer(layer, sample, layer_kwargs)
-            finally:
-                for handle in handles:
-                    handle.remove()
-
             for name in names:
                 module = layer.get_submodule(name)
+                cache_key = f"model.layers.{layer_index}.{name}"
+                hessian = hessian_store.get(cache_key)
+                if hessian is None:
+                    accumulator = _HessianAccumulator(
+                        module.weight.shape[1],
+                        module.weight.device,
+                    )
+                    handle = module.register_forward_hook(
+                        lambda _module, inputs, _output, target=accumulator: target.add_batch(
+                            inputs[0].detach()
+                        )
+                    )
+                    try:
+                        for sample in tqdm(
+                            inps,
+                            desc=f"Layer {layer_index + 1}: Hessian samples",
+                            unit="sample",
+                            leave=False,
+                        ):
+                            _forward_layer(layer, sample, layer_kwargs)
+                    finally:
+                        handle.remove()
+                    hessian = accumulator.H
+                    hessian_store.put(cache_key, hessian)
                 centers, shadow_weight = codebook.fit_upstream_layer(
                     module.weight.data,
-                    accumulators[name].H,
+                    hessian,
                 )
-                full_name = f"model.layers.{layer_index}.{name}"
-                store.put(full_name, centers.unsqueeze(1))
+                store.put(cache_key, centers.unsqueeze(1))
                 module.weight.data = shadow_weight
-                del accumulators[name], centers, shadow_weight
+                del centers, shadow_weight
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
@@ -204,6 +210,7 @@ def collect_leanquant_codebooks(
             torch.cuda.empty_cache()
 
     store.mark_complete()
+    hessian_store.mark_complete()
     if original_use_cache is not None:
         model.config.use_cache = original_use_cache
 

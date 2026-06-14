@@ -132,6 +132,7 @@ fi
   codebook_benchmark.py \
   quantizers/base_codebook.py \
   quantizers/codebook_store.py \
+  quantizers/hessian_store.py \
   quantizers/codebook_factory.py \
   quantizers/leanquant_collector.py \
   quantizers/leanquant_codebook.py \
