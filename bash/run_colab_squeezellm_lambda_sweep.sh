@@ -122,6 +122,13 @@ fi
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/squeezellm_lambda_sweep_${TIMESTAMP}.log"
+RUNS_DIR="$LOCAL_OUTPUT_ROOT/runs"
+mkdir -p "$RUNS_DIR"
+
+lambda_tag() {
+  local value="$1"
+  echo "$value" | tr '.' 'p'
+}
 
 sync_results() {
   if [ "$USE_DRIVE" = "1" ]; then
@@ -134,13 +141,16 @@ run_benchmark() {
   local method="$1"
   local lambda_value="$2"
   local run_label="$3"
+  local run_tag
+  run_tag="$(lambda_tag "$lambda_value")"
+  local run_output_root="$RUNS_DIR/squeezellm_3bit_${method}_l${run_tag}"
   {
     echo
     echo "=== $run_label | method=$method | lambda=$lambda_value ==="
     "$PYTHON_BIN" codebook_benchmark.py \
       --model-path "$MODEL" \
       --device "$DEVICE" \
-      --output-root "$LOCAL_OUTPUT_ROOT" \
+      --output-root "$run_output_root" \
       --resume \
       --codebooks squeezellm \
       --bits "$BITS" \
@@ -181,7 +191,7 @@ run_benchmark() {
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
 } | tee -a "$LOG_FILE"
 
-BASELINE_CSV="$LOCAL_OUTPUT_ROOT/benchmark_results.csv"
+BASELINE_CSV="$RUNS_DIR/squeezellm_3bit_rtn/benchmark_results.csv"
 if [ -f "$BASELINE_CSV" ] && "$PYTHON_BIN" - "$BASELINE_CSV" <<'PY'
 import csv
 import sys
@@ -207,13 +217,72 @@ for lambda_value in $LAMBDA_VALUES; do
   run_benchmark rbvt "$lambda_value" "RBVT sweep"
 done
 
-RESULT_CSV="$LOCAL_OUTPUT_ROOT/benchmark_results.csv"
-if [ ! -f "$RESULT_CSV" ]; then
-  echo "Error: benchmark_results.csv not found at $RESULT_CSV" >&2
+RESULTS_JSON="$LOCAL_OUTPUT_ROOT/benchmark_results.json"
+RESULTS_CSV="$LOCAL_OUTPUT_ROOT/benchmark_results.csv"
+RESULTS_MD="$LOCAL_OUTPUT_ROOT/benchmark_results.md"
+
+"$PYTHON_BIN" - "$RUNS_DIR" "$RESULTS_JSON" "$RESULTS_CSV" "$RESULTS_MD" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+runs_dir = Path(sys.argv[1])
+json_path = Path(sys.argv[2])
+csv_path = Path(sys.argv[3])
+md_path = Path(sys.argv[4])
+
+rows = []
+for result_csv in sorted(runs_dir.glob("*/benchmark_results.csv")):
+    with result_csv.open(newline="", encoding="utf-8") as handle:
+        rows.extend(list(csv.DictReader(handle)))
+
+if not rows:
+    raise SystemExit(f"No benchmark_results.csv files found under {runs_dir}")
+
+fieldnames = [
+    "model",
+    "codebook",
+    "bits",
+    "method",
+    "rbvt-lambda",
+    "ppl-wiki",
+    "ppl-c4",
+    "arc-c",
+    "arc-e",
+    "boolq",
+    "hellaswag",
+    "lambada",
+    "openbookqa",
+    "piqa",
+    "rte",
+    "winogrande",
+    "avg",
+]
+
+json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+with csv_path.open("w", newline="", encoding="utf-8") as handle:
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+
+md_lines = [
+    "| " + " | ".join(fieldnames) + " |",
+    "|" + "|".join(["---"] * len(fieldnames)) + "|",
+]
+for row in rows:
+    md_lines.append("| " + " | ".join(row.get(col, "") for col in fieldnames) + " |")
+md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+print(f"Wrote aggregate report to {json_path}, {csv_path}, {md_path}")
+PY
+
+if [ ! -f "$RESULTS_CSV" ]; then
+  echo "Error: benchmark_results.csv not found at $RESULTS_CSV" >&2
   exit 1
 fi
 
-"$PYTHON_BIN" - "$RESULT_CSV" <<'PY'
+"$PYTHON_BIN" - "$RESULTS_CSV" <<'PY'
 import csv
 import sys
 from math import inf
@@ -292,5 +361,5 @@ PY
 sync_results
 
 echo "Sweep complete."
-echo "Results: $LOCAL_OUTPUT_ROOT/benchmark_results.csv"
+echo "Results: $RESULTS_CSV"
 echo "Log: $LOG_FILE"
