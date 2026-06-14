@@ -53,6 +53,7 @@ RESULT_COLUMNS = [
     "codebook",
     "bits",
     "method",
+    "rbvt-lambda",
     "ppl-wiki",
     "ppl-c4",
     "arc-c",
@@ -253,6 +254,9 @@ def build_result_row(summary: dict) -> dict:
         }.get(summary["codebook"], summary["codebook"]),
         "bits": summary["bits"],
         "method": summary["method"].upper(),
+        "rbvt-lambda": summary.get("args", {}).get("rbvt_lambda")
+        if summary.get("method") == "rbvt"
+        else "",
         "ppl-wiki": perplexity.get("WikiText-2", {}).get("perplexity"),
         "ppl-c4": perplexity.get("C4", {}).get("perplexity"),
     }
