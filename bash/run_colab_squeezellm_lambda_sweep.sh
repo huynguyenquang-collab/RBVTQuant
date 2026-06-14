@@ -46,6 +46,8 @@ LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 INCLUDE_LM_EVAL="${INCLUDE_LM_EVAL:-1}"
 KEEP_MODEL="${KEEP_MODEL:-0}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
+RUN_RTN="${RUN_RTN:-1}"
+SELECT_BEST="${SELECT_BEST:-1}"
 
 HF_HOME="${HF_HOME:-/content/huggingface}"
 HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/content/huggingface/datasets}"
@@ -191,8 +193,9 @@ run_benchmark() {
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
 } | tee -a "$LOG_FILE"
 
-BASELINE_CSV="$RUNS_DIR/squeezellm_3bit_rtn/benchmark_results.csv"
-if [ -f "$BASELINE_CSV" ] && "$PYTHON_BIN" - "$BASELINE_CSV" <<'PY'
+if [ "$RUN_RTN" = "1" ]; then
+  BASELINE_CSV="$RUNS_DIR/squeezellm_3bit_rtn/benchmark_results.csv"
+  if [ -f "$BASELINE_CSV" ] && "$PYTHON_BIN" - "$BASELINE_CSV" <<'PY'
 import csv
 import sys
 
@@ -207,10 +210,13 @@ has_rtn = any(
 )
 raise SystemExit(0 if has_rtn else 1)
 PY
-then
-  echo "Reusing existing RTN baseline from $BASELINE_CSV" | tee -a "$LOG_FILE"
+  then
+    echo "Reusing existing RTN baseline from $BASELINE_CSV" | tee -a "$LOG_FILE"
+  else
+    run_benchmark rtn 0 "RTN baseline"
+  fi
 else
-  run_benchmark rtn 0 "RTN baseline"
+  echo "Skipping RTN baseline." | tee -a "$LOG_FILE"
 fi
 
 for lambda_value in $LAMBDA_VALUES; do
@@ -282,7 +288,8 @@ if [ ! -f "$RESULTS_CSV" ]; then
   exit 1
 fi
 
-"$PYTHON_BIN" - "$RESULTS_CSV" <<'PY'
+if [ "$SELECT_BEST" = "1" ]; then
+  "$PYTHON_BIN" - "$RESULTS_CSV" <<'PY'
 import csv
 import sys
 from math import inf
@@ -357,6 +364,9 @@ print(
     f"ppl-wiki={best['ppl-wiki']} ppl-c4={best['ppl-c4']} avg={best['avg']}"
 )
 PY
+else
+  echo "Selection disabled; reporting all lambda results only." | tee -a "$LOG_FILE"
+fi
 
 sync_results
 
