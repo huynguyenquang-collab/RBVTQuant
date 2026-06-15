@@ -62,9 +62,13 @@ bash bash/run_server_leanquant.sh
 ```
 
 The server runner stores outputs under `outputs/leanquant_server`, uses
-`.venv-server`, installs PyTorch `2.5.1` with CUDA `12.1`, and runs LeanQuant
-non-uniform for 3/4-bit RTN and RBVT. To repair an existing environment that
-installed a newer incompatible CUDA runtime, rerun:
+`.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
+official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
+RTN and RBVT. To repair an existing environment, rerun:
+
+The CUDA 12.6 wheel relies on NVIDIA CUDA 12.x minor-version compatibility for
+driver 535. Server setup runs CUDA GEMM and Cholesky smoke tests and stops
+before benchmarking if the installed driver cannot execute this wheel.
 
 ```bash
 git pull

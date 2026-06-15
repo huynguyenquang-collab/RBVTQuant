@@ -10,9 +10,10 @@ VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 # These values are intentionally fixed for the supported server driver (535).
 # Do not inherit stale PYTORCH_* variables from the login shell.
-PYTORCH_VERSION="2.5.1"
-PYTORCH_CUDA_RUNTIME="12.1"
-PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
+PYTORCH_VERSION="2.12.0"
+TORCHVISION_VERSION="0.27.0"
+PYTORCH_CUDA_RUNTIME="12.6"
+PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
 CACHE_ROOT="${CACHE_ROOT:-$ROOT_DIR/.cache}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE_ROOT/uv}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-$CACHE_ROOT/pip}"
@@ -25,6 +26,7 @@ echo "Repository: $ROOT_DIR"
 echo "Repository commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "Python: $PYTHON_VERSION"
 echo "PyTorch: $PYTORCH_VERSION"
+echo "Torchvision: $TORCHVISION_VERSION"
 echo "PyTorch CUDA runtime: $PYTORCH_CUDA_RUNTIME"
 echo "PyTorch index: $PYTORCH_INDEX_URL"
 echo "Virtual environment: $VENV_DIR"
@@ -61,19 +63,28 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
 fi
 
 TORCH_MATCHES=0
-if "$VENV_DIR/bin/python" - "$PYTORCH_VERSION" "$PYTORCH_CUDA_RUNTIME" <<'PY'
+if "$VENV_DIR/bin/python" - \
+  "$PYTORCH_VERSION" \
+  "$PYTORCH_CUDA_RUNTIME" \
+  "$TORCHVISION_VERSION" <<'PY'
 import sys
 
 try:
     import torch
+    import torchvision
 except ImportError:
     raise SystemExit(1)
 
-expected_version, expected_cuda = sys.argv[1:]
+expected_version, expected_cuda, expected_torchvision = sys.argv[1:]
 installed_version = torch.__version__.split("+", 1)[0]
+installed_torchvision = torchvision.__version__.split("+", 1)[0]
 raise SystemExit(
     0
-    if installed_version == expected_version and torch.version.cuda == expected_cuda
+    if (
+        installed_version == expected_version
+        and torch.version.cuda == expected_cuda
+        and installed_torchvision == expected_torchvision
+    )
     else 1
 )
 PY
@@ -96,6 +107,7 @@ else
     --python "$VENV_DIR/bin/python" \
     --reinstall \
     "torch==$PYTORCH_VERSION" \
+    "torchvision==$TORCHVISION_VERSION" \
     --index-url "$PYTORCH_INDEX_URL"
 fi
 
@@ -103,9 +115,11 @@ fi
 import sys
 
 import torch
+import torchvision
 
 print("Python:", sys.version.replace("\n", " "))
 print("PyTorch:", torch.__version__)
+print("Torchvision:", torchvision.__version__)
 print("CUDA runtime:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
 if sys.version_info[:2] != (3, 12):
@@ -120,6 +134,17 @@ print(
     "GPU memory GiB:",
     round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 2),
 )
+
+# Exercise the CUDA operations used by Hessian collection and LeanQuant.
+device = torch.device("cuda:0")
+matrix = torch.randn(256, 256, device=device, dtype=torch.float32)
+gram = matrix @ matrix.t()
+positive_definite = gram + torch.eye(256, device=device) * 1e-3
+factor = torch.linalg.cholesky(positive_definite)
+if not torch.isfinite(factor).all():
+    raise SystemExit("CUDA Cholesky smoke test produced non-finite values")
+torch.cuda.synchronize()
+print("CUDA GEMM/Cholesky smoke test: OK")
 PY
 
 echo "Testing lm-eval PIQA dataset compatibility ..."
