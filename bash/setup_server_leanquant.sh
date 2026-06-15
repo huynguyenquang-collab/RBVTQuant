@@ -122,4 +122,7 @@ print(
 )
 PY
 
+echo "Testing lm-eval PIQA dataset compatibility ..."
+"$VENV_DIR/bin/python" lm_eval_dataset_smoke.py --download-piqa
+
 echo "Server setup complete."

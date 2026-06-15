@@ -22,4 +22,8 @@ echo
 echo "=== Benchmark CLI check ==="
 "$PYTHON_BIN" codebook_benchmark.py --help >/dev/null
 
+echo
+echo "=== lm-eval datasets compatibility check ==="
+"$PYTHON_BIN" lm_eval_dataset_smoke.py
+
 echo "Smoke tests passed."

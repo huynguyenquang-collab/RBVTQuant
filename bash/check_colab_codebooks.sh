@@ -130,6 +130,8 @@ fi
 
 "$PYTHON_BIN" -m py_compile \
   codebook_benchmark.py \
+  lm_eval_dataset_smoke.py \
+  lm_eval_runner.py \
   quantizers/base_codebook.py \
   quantizers/codebook_store.py \
   quantizers/hessian_store.py \
