@@ -73,6 +73,8 @@ bash bash/setup_server_leanquant.sh
 
 Runtime notes:
 
+- `datasets==3.6.0` is pinned because `lm-eval==0.4.4` still loads task
+  dataset scripts such as PIQA; `datasets` 4.x removed that capability.
 - `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
 - `lm-eval` uses the same task presets as the reference source. The default preset is `extended`:
   `arc_easy`, `arc_challenge`, `hellaswag`, `piqa`, `winogrande`, `boolq`, `rte`, `openbookqa`, `lambada_openai`.
