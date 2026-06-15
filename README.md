@@ -54,6 +54,16 @@ Codebook benchmarks:
 - RTN and RBVT consume the same cached upstream grid/LUT. RBVT calibration and
   evaluation retain the settings used by `main.py`.
 
+Run the full LeanQuant matrix on a Linux GPU server:
+
+```bash
+export HF_TOKEN=<hugging-face-token>
+bash bash/run_server_leanquant.sh
+```
+
+The server runner stores outputs under `outputs/leanquant_server`, uses
+`.venv-server`, and runs LeanQuant non-uniform for 3/4-bit RTN and RBVT.
+
 Runtime notes:
 
 - `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
