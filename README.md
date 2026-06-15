@@ -84,6 +84,16 @@ This runs 4-bit and 3-bit RTN/RBVT without extracting sparse or sensitive
 weights. Its cache is stored under `outputs/squeezellm_dense_only_server` and
 cannot reuse the hybrid codebook or sparse-residual caches.
 
+Sweep 4-bit dense-only RBVT with lambda `0.1`, `0.5`, and `3`:
+
+```bash
+RUN_SETUP=0 bash bash/run_server_squeezellm_dense_only_lambda_sweep.sh
+```
+
+The sweep reuses the Fisher and LUT statistics under
+`outputs/squeezellm_dense_only_server/_statistics`, while each lambda keeps an
+independent output and run summary.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
