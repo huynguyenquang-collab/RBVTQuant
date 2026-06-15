@@ -1,17 +1,17 @@
-"""Layer-sequential LeanQuant Hessian and codebook collection."""
+"""Layer-sequential collection using LeanQuant's upstream implementation."""
 
 from __future__ import annotations
 
-import math
-from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from .base_codebook import BaseCodebook
 from .codebook_store import CodebookStore
 from .hessian_store import HessianStore
-from .leanquant_codebook import LeanQuantCodebook
+from .upstream_imports import load_leanquant_upstream
 
 
 class _StopCapture(Exception):
@@ -29,27 +29,6 @@ class _InputCatcher(nn.Module):
         self.inputs.append(hidden_states.detach())
         self.state["kwargs"] = kwargs
         raise _StopCapture
-
-
-class _HessianAccumulator:
-    """Byte-for-byte formula used by LeanQuant.LeanQuant.add_batch."""
-
-    def __init__(self, columns: int, device: torch.device):
-        self.H = torch.zeros((columns, columns), device=device)
-        self.nsamples = 0
-
-    @torch.no_grad()
-    def add_batch(self, inputs: torch.Tensor):
-        if inputs.ndim == 2:
-            inputs = inputs.unsqueeze(0)
-        batch_size = inputs.shape[0]
-        if inputs.ndim == 3:
-            inputs = inputs.reshape(-1, inputs.shape[-1])
-        inputs = inputs.t()
-        self.H *= self.nsamples / (self.nsamples + batch_size)
-        self.nsamples += batch_size
-        inputs = math.sqrt(2 / self.nsamples) * inputs.float()
-        self.H += inputs.matmul(inputs.t())
 
 
 def _forward_layer(layer: nn.Module, hidden_states: torch.Tensor, kwargs: dict):
@@ -78,17 +57,19 @@ def collect_leanquant_codebooks(
     token_samples: list[torch.Tensor],
     store: CodebookStore,
     hessian_store: HessianStore,
-    codebook: LeanQuantCodebook,
+    codebook: BaseCodebook,
     device: str,
 ):
-    """Run LeanQuant's true-sequential shadow pass and persist its exact grids."""
+    """Run upstream LeanQuant true-sequential quantization and persist its grids."""
 
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
         raise TypeError("LeanQuant collection currently requires a Llama model")
+    LeanQuant, Quantizer = load_leanquant_upstream()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     metadata = {
-        "algorithm": "leanquant_upstream_true_sequential",
+        "algorithm": "leanquant_direct_upstream_true_sequential",
+        "source": "LeanQuant/lean_quantizer.py",
         "bits": codebook.bits,
         "exponent": codebook.exponent,
         "percdamp": codebook.percdamp,
@@ -98,6 +79,13 @@ def collect_leanquant_codebooks(
         "num_examples": len(token_samples),
         "sequence_length": int(token_samples[0].shape[1]),
     }
+    upstream_args = SimpleNamespace(
+        offload_threshold=53248,
+        exponent=float(codebook.exponent),
+        wbits=codebook.bits,
+        kmeans_seed=codebook.kmeans_seed,
+        save_path="rbvtquant-upstream-codebook",
+    )
     if store.complete:
         if store.metadata != metadata:
             raise ValueError(
@@ -162,39 +150,66 @@ def collect_leanquant_codebooks(
             unit="subset",
             leave=False,
         ):
+            workers = {}
+            handles = []
             for name in names:
                 module = layer.get_submodule(name)
                 cache_key = f"model.layers.{layer_index}.{name}"
+                leanquant = LeanQuant(module)
+                workers[name] = (module, cache_key, leanquant)
                 hessian = hessian_store.get(cache_key)
                 if hessian is None:
-                    accumulator = _HessianAccumulator(
-                        module.weight.shape[1],
-                        module.weight.device,
-                    )
-                    handle = module.register_forward_hook(
-                        lambda _module, inputs, _output, target=accumulator: target.add_batch(
-                            inputs[0].detach()
+                    handles.append(
+                        module.register_forward_hook(
+                            lambda _module, inputs, output, target=leanquant: target.add_batch(
+                                inputs[0].data,
+                                output.data,
+                            )
                         )
                     )
-                    try:
-                        for sample in tqdm(
-                            inps,
-                            desc=f"Layer {layer_index + 1}: Hessian samples",
-                            unit="sample",
-                            leave=False,
-                        ):
-                            _forward_layer(layer, sample, layer_kwargs)
-                    finally:
+                else:
+                    leanquant.H = hessian.to(module.weight.device)
+
+            if handles:
+                try:
+                    for sample in tqdm(
+                        inps,
+                        desc=f"Layer {layer_index + 1}: Hessian samples",
+                        unit="sample",
+                        leave=False,
+                    ):
+                        _forward_layer(layer, sample, layer_kwargs)
+                finally:
+                    for handle in handles:
                         handle.remove()
-                    hessian = accumulator.H
-                    hessian_store.put(cache_key, hessian)
-                centers, shadow_weight = codebook.fit_upstream_layer(
-                    module.weight.data,
-                    hessian,
+                for _name, (_module, cache_key, leanquant) in workers.items():
+                    if not hessian_store.has(cache_key):
+                        hessian_store.put(cache_key, leanquant.H)
+
+            for name in names:
+                module, cache_key, leanquant = workers[name]
+                leanquant.quantizer = Quantizer()
+                leanquant.quantizer.configure(
+                    codebook.bits,
+                    perchannel=True,
+                    sym=False,
+                    mse=False,
                 )
+                leanquant.fasterquant(
+                    blocksize=codebook.gptq_block_size,
+                    percdamp=codebook.percdamp,
+                    groupsize=-1,
+                    actorder=codebook.act_order,
+                    static_groups=False,
+                    args=upstream_args,
+                )
+                centers = torch.sort(
+                    leanquant.quant_grid.detach().float(),
+                    dim=1,
+                ).values
                 store.put(cache_key, centers.unsqueeze(1))
-                module.weight.data = shadow_weight
-                del centers, shadow_weight
+                leanquant.free()
+                del centers, leanquant
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 

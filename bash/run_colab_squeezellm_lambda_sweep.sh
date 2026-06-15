@@ -28,7 +28,6 @@ MAX_LENGTH="${MAX_LENGTH:-2048}"
 SEED="${SEED:-42}"
 
 GROUP_SIZE="${GROUP_SIZE:--1}"
-FIT_ROW_CHUNK="${FIT_ROW_CHUNK:-32}"
 ROW_CHUNK="${ROW_CHUNK:-1024}"
 SQUEEZELLM_FISHER_SAMPLES="${SQUEEZELLM_FISHER_SAMPLES:-100}"
 SQUEEZELLM_FISHER_LENGTH="${SQUEEZELLM_FISHER_LENGTH:-512}"
@@ -162,7 +161,6 @@ run_benchmark() {
       --max-length "$MAX_LENGTH" \
       --seed "$SEED" \
       --group-size "$GROUP_SIZE" \
-      --fit-row-chunk "$FIT_ROW_CHUNK" \
       --row-chunk "$ROW_CHUNK" \
       --squeezellm-fisher-samples "$SQUEEZELLM_FISHER_SAMPLES" \
       --squeezellm-fisher-length "$SQUEEZELLM_FISHER_LENGTH" \

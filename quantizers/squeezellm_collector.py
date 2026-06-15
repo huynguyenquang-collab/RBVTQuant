@@ -1,27 +1,27 @@
-"""Exact Fisher gradient-square collector used by SqueezeLLM."""
+"""Fisher collection plus direct invocation of SqueezeLLM's upstream LUT code."""
 
 from __future__ import annotations
 
 import json
+import os
+from multiprocessing import Pool
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+
+from .codebook_store import CodebookStore
+from .sensitivity_store import SensitivityStore
+from .upstream_imports import load_squeezellm_kmeans, load_squeezellm_model_parse
 
 
 def _squeezellm_linears(model) -> list[tuple[str, nn.Linear]]:
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
         raise TypeError("SqueezeLLM Fisher collection currently requires a Llama model")
-    names = (
-        "self_attn.q_proj",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
-        "self_attn.o_proj",
-        "mlp.gate_proj",
-        "mlp.up_proj",
-        "mlp.down_proj",
-    )
+    model_parse = load_squeezellm_model_parse()
+    names = model_parse.get_sequential("llama")
     result = []
     for layer_index, layer in enumerate(model.model.layers):
         for relative_name in names:
@@ -103,4 +103,54 @@ def collect_squeezellm_fisher(
     return output_dir
 
 
-__all__ = ["collect_squeezellm_fisher"]
+def collect_squeezellm_codebooks(
+    model,
+    sensitivity_store: SensitivityStore,
+    store: CodebookStore,
+    bits: int,
+):
+    """Generate dense-only LUTs with SqueezeLLM/quantization/nuq.py::kmeans_fit."""
+
+    metadata = {
+        "algorithm": "squeezellm_direct_upstream_dense_fisher_kmeans",
+        "source": "SqueezeLLM/quantization/nuq.py",
+        "bits": bits,
+        "fisher": str(sensitivity_store.path),
+        "sparsity": 0.0,
+    }
+    if store.complete:
+        store.validate(metadata)
+        print(f"Reusing SqueezeLLM upstream codebook cache: {store.root}")
+        return
+    store.initialize(metadata)
+
+    kmeans_fit = load_squeezellm_kmeans()
+    linears = _squeezellm_linears(model)
+    workers = os.cpu_count() or 1
+    print(
+        "Building SqueezeLLM dense-only LUTs with upstream nuq.py | "
+        f"layers={len(linears)} | workers={workers}"
+    )
+    with Pool(workers) as pool:
+        for layer_name, module in tqdm(linears, desc="SqueezeLLM upstream LUTs"):
+            weight = module.weight.detach().float().cpu()
+            sensitivity = sensitivity_store.get(layer_name, weight.shape)
+            weight_np = weight.numpy()
+            sensitivity_np = sensitivity.numpy()
+            tasks = []
+            for row, gradient_row in zip(weight_np, sensitivity_np):
+                sample_weight = gradient_row * (row != 0)
+                if np.sum(sample_weight) == 0:
+                    sample_weight = np.ones_like(sample_weight)
+                tasks.append((row.reshape(-1, 1), sample_weight, 2**bits))
+            results = list(pool.imap(kmeans_fit, tasks))
+            centers = torch.from_numpy(
+                np.stack([result[0] for result in results])
+            ).float()
+            centers = torch.sort(centers, dim=1).values
+            store.put(layer_name, centers.unsqueeze(1))
+
+    store.mark_complete()
+
+
+__all__ = ["collect_squeezellm_codebooks", "collect_squeezellm_fisher"]

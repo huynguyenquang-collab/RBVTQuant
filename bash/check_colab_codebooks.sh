@@ -135,10 +135,34 @@ fi
   quantizers/hessian_store.py \
   quantizers/codebook_factory.py \
   quantizers/leanquant_collector.py \
-  quantizers/leanquant_codebook.py \
   quantizers/sensitivity_store.py \
   quantizers/squeezellm_collector.py \
-  quantizers/squeezellm_codebook.py \
-  quantizers/upstream_calibration.py
+  quantizers/upstream_imports.py \
+  quantizers/upstream_calibration.py \
+  LeanQuant/lean_quantizer.py \
+  SqueezeLLM/quantization/nuq.py \
+  SqueezeLLM/squeezellm/model_parse.py
+
+"$PYTHON_BIN" - <<'PY'
+import sys
+
+from quantizers.upstream_imports import (
+    load_leanquant_upstream,
+    load_squeezellm_kmeans,
+    load_squeezellm_model_parse,
+)
+
+LeanQuant, Quantizer = load_leanquant_upstream()
+kmeans_fit = load_squeezellm_kmeans()
+model_parse = load_squeezellm_model_parse()
+print("LeanQuant upstream:", LeanQuant.__module__, Quantizer.__module__)
+print("SqueezeLLM upstream:", kmeans_fit.__module__, model_parse.__name__)
+
+leanquant_module = sys.modules.get("lean_quantizer")
+pool = getattr(leanquant_module, "pool", None)
+if pool is not None:
+    pool.close()
+    pool.join()
+PY
 
 echo "Preflight passed."

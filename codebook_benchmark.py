@@ -32,8 +32,12 @@ from quantizers.hessian_store import HessianStore
 from quantizers.codebook_factory import get_codebook
 from quantizers.leanquant_collector import collect_leanquant_codebooks
 from quantizers.sensitivity_store import SensitivityStore
-from quantizers.squeezellm_collector import collect_squeezellm_fisher
+from quantizers.squeezellm_collector import (
+    collect_squeezellm_codebooks,
+    collect_squeezellm_fisher,
+)
 from quantizers.upstream_calibration import load_upstream_c4_tokens
+from quantizers.upstream_imports import load_leanquant_upstream
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
 
 
@@ -113,7 +117,6 @@ def quantize_with_codebook(
     method: str,
     means: Dict[str, torch.Tensor],
     variances: Dict[str, torch.Tensor],
-    sensitivity_store: SensitivityStore,
     skip_lmhead: bool,
     row_chunk: int,
     rbvt_lambda: float,
@@ -152,22 +155,12 @@ def quantize_with_codebook(
     for name, module in tqdm(linears, desc="Quantizing layers"):
         weight = module.weight.data
         cached_centers = codebook_store.get(name)
-        sensitivity = (
-            sensitivity_store.get(name, weight.shape)
-            if cached_centers is None and codebook.name.startswith("squeezellm")
-            else None
-        )
         codebook.set_context(
             CodebookContext(
-                activation_mean=means.get(name),
-                activation_variance=variances.get(name),
-                sensitivity=sensitivity,
                 precomputed_centers=cached_centers,
             )
         )
         quantized = codebook.quantize(weight, row_chunk=row_chunk)
-        if cached_centers is None:
-            codebook_store.put(name, quantized.block_codebooks)
         output = quantized.W_dequant
 
         if method == "rbvt":
@@ -190,7 +183,7 @@ def quantize_with_codebook(
 
         module.weight.data = output.to(weight.dtype)
         codebook.set_context(None)
-        del sensitivity, quantized, output, weight
+        del quantized, output, weight
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -377,8 +370,6 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         name=codebook_name,
         bits=bits,
         group_size=args.group_size,
-        n_iters=args.kmeans_iters,
-        fit_row_chunk=args.fit_row_chunk,
         leanquant_exponent=args.leanquant_exponent,
         leanquant_percdamp=args.leanquant_percdamp,
         leanquant_act_order=args.leanquant_act_order,
@@ -387,10 +378,16 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     cache_root = Path(args.statistics_cache_dir or Path(args.output_root) / "_statistics")
     model_slug = build_model_slug(args.model_path)
     codebook_store = CodebookStore(
-        cache_root / "codebooks" / model_slug / f"{codebook_name}_{bits}bit"
+        cache_root
+        / "codebooks"
+        / model_slug
+        / f"{codebook_name}_{bits}bit_direct_upstream"
     )
     hessian_store = HessianStore(
-        cache_root / "hessian" / model_slug / f"{codebook_name}_{bits}bit"
+        cache_root
+        / "hessian"
+        / model_slug
+        / f"{codebook_name}_{bits}bit_direct_upstream"
     )
 
     sensitivity_path = None
@@ -401,7 +398,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
                 tokenizer=tokenizer,
                 n_samples=args.n_calib,
                 seqlen=args.max_length,
-                seed=args.seed,
+                seed=0,
                 cache_dir=cache_root / "calibration",
             )
             print("Building LeanQuant codebooks (shadow pass) ...")
@@ -462,16 +459,12 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
 
     sensitivity_store = SensitivityStore(sensitivity_path)
     if codebook_name == "squeezellm":
-        expected_store_metadata = {
-            "algorithm": "squeezellm_dense_fisher_kmeans",
-            "model": args.model_path,
-            "bits": bits,
-            "fisher": str(sensitivity_path),
-        }
-        if codebook_store.complete:
-            codebook_store.validate(expected_store_metadata)
-        else:
-            codebook_store.initialize(expected_store_metadata)
+        collect_squeezellm_codebooks(
+            model=model,
+            sensitivity_store=sensitivity_store,
+            store=codebook_store,
+            bits=bits,
+        )
     print(
         f"Loaded quantizer: {codebook} | sensitivity={sensitivity_mode} | "
         f"codebook_cache={codebook_store.root}"
@@ -520,7 +513,6 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         method=method,
         means=means,
         variances=variances,
-        sensitivity_store=sensitivity_store,
         skip_lmhead=args.skip_lmhead,
         row_chunk=args.row_chunk,
         rbvt_lambda=args.rbvt_lambda,
@@ -640,18 +632,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--group-size", type=int, default=-1)
     parser.add_argument(
-        "--kmeans-iters",
-        type=int,
-        default=20,
-        help="Compatibility option; upstream LeanQuant/SqueezeLLM use 100/50",
-    )
-    parser.add_argument(
-        "--fit-row-chunk",
-        type=int,
-        default=32,
-        help="Maximum rows fitted together when learning codebook centers",
-    )
-    parser.add_argument(
         "--row-chunk",
         type=int,
         default=1024,
@@ -706,6 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     load_runtime_env()
     args = build_parser().parse_args()
+    if "leanquant" in args.codebooks:
+        load_leanquant_upstream()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
             f"{args.device} was requested, but CUDA is unavailable. "
@@ -740,7 +722,7 @@ def main():
     )
     print(
         "Upstream codebook statistics: "
-        f"LeanQuant=C4/{args.n_calib}x{args.max_length}, "
+        f"LeanQuant=C4/{args.n_calib}x{args.max_length}, seed=0, "
         "true-sequential full Hessian; "
         f"SqueezeLLM=C4/{args.squeezellm_fisher_samples}x"
         f"{args.squeezellm_fisher_length}, Fisher seed=0"
