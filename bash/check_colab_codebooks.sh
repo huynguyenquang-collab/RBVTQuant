@@ -140,6 +140,8 @@ fi
   quantizers/upstream_imports.py \
   quantizers/upstream_calibration.py \
   LeanQuant/lean_quantizer.py \
+  SqueezeLLM-gradients/datautils.py \
+  SqueezeLLM-gradients/run.py \
   SqueezeLLM/quantization/nuq.py \
   SqueezeLLM/squeezellm/model_parse.py
 
@@ -148,15 +150,23 @@ import sys
 
 from quantizers.upstream_imports import (
     load_leanquant_upstream,
+    load_squeezellm_gradients,
     load_squeezellm_kmeans,
     load_squeezellm_model_parse,
 )
 
 LeanQuant, Quantizer = load_leanquant_upstream()
+get_loaders, get_modules, square_grad_hook = load_squeezellm_gradients()
 kmeans_fit = load_squeezellm_kmeans()
 model_parse = load_squeezellm_model_parse()
 print("LeanQuant upstream:", LeanQuant.__module__, Quantizer.__module__)
 print("SqueezeLLM upstream:", kmeans_fit.__module__, model_parse.__name__)
+print(
+    "SqueezeLLM-gradients upstream:",
+    get_loaders.__module__,
+    get_modules.__upstream_source__,
+    square_grad_hook.__upstream_source__,
+)
 
 leanquant_module = sys.modules.get("lean_quantizer")
 pool = getattr(leanquant_module, "pool", None)

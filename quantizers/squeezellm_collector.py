@@ -14,7 +14,12 @@ from tqdm import tqdm
 
 from .codebook_store import CodebookStore
 from .sensitivity_store import SensitivityStore
-from .upstream_imports import load_squeezellm_kmeans, load_squeezellm_model_parse
+from .upstream_imports import (
+    SQUEEZELLM_GRADIENTS_SOURCE,
+    load_squeezellm_gradients,
+    load_squeezellm_kmeans,
+    load_squeezellm_model_parse,
+)
 
 
 def _squeezellm_linears(model) -> list[tuple[str, nn.Linear]]:
@@ -22,10 +27,16 @@ def _squeezellm_linears(model) -> list[tuple[str, nn.Linear]]:
         raise TypeError("SqueezeLLM Fisher collection currently requires a Llama model")
     model_parse = load_squeezellm_model_parse()
     names = model_parse.get_sequential("llama")
+    _, get_modules, _ = load_squeezellm_gradients()
     result = []
     for layer_index, layer in enumerate(model.model.layers):
-        for relative_name in names:
-            module = layer.get_submodule(relative_name)
+        modules = get_modules(layer)
+        if len(names) != len(modules):
+            raise RuntimeError(
+                "SqueezeLLM and SqueezeLLM-gradients disagree on Llama layer count: "
+                f"{len(names)} names != {len(modules)} modules"
+            )
+        for relative_name, module in zip(names, modules):
             if not isinstance(module, nn.Linear):
                 raise TypeError(
                     f"Expected Linear at model.layers.{layer_index}.{relative_name}"
@@ -34,13 +45,30 @@ def _squeezellm_linears(model) -> list[tuple[str, nn.Linear]]:
     return result
 
 
+def load_squeezellm_fisher_data(
+    model_path: str,
+    num_examples: int = 100,
+    sequence_length: int = 512,
+):
+    """Call SqueezeLLM-gradients/datautils.py::get_loaders directly."""
+
+    get_loaders, _, _ = load_squeezellm_gradients()
+    dataloader, _ = get_loaders(
+        "c4",
+        model=model_path,
+        seqlen=sequence_length,
+        nsamples=num_examples,
+    )
+    return dataloader
+
+
 def collect_squeezellm_fisher(
     model,
-    token_samples: list[torch.Tensor],
+    dataloader,
     output_dir: str | Path,
     device: str,
 ) -> Path:
-    """Match SqueezeLLM-gradients: square each backward gradient and accumulate."""
+    """Run the Fisher operations defined by SqueezeLLM-gradients/run.py."""
 
     output_dir = Path(output_dir)
     manifest_path = output_dir / "manifest.json"
@@ -52,26 +80,22 @@ def collect_squeezellm_fisher(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     linears = _squeezellm_linears(model)
+    _, _, square_grad_hook = load_squeezellm_gradients()
     handles = [
-        module.weight.register_hook(lambda gradient: gradient.pow(2))
+        module.weight.register_hook(square_grad_hook)
         for _, module in linears
     ]
-    original_use_cache = getattr(model.config, "use_cache", None)
-    if original_use_cache is not None:
-        model.config.use_cache = False
     model.train()
     model.zero_grad(set_to_none=True)
 
     try:
-        for input_ids in tqdm(token_samples, desc="Collecting SqueezeLLM Fisher"):
-            inputs = input_ids.to(device)
-            outputs = model(input_ids=inputs, labels=inputs)
+        for data in tqdm(dataloader, desc="Collecting SqueezeLLM Fisher"):
+            input_ids = data[0].to(device)
+            outputs = model(input_ids=input_ids, labels=input_ids)
             outputs.loss.backward()
     finally:
         for handle in handles:
             handle.remove()
-        if original_use_cache is not None:
-            model.config.use_cache = original_use_cache
 
     layers = {}
     for layer_name, module in linears:
@@ -87,9 +111,11 @@ def collect_squeezellm_fisher(
             {
                 "complete": True,
                 "format": "sum_of_per_sample_gradient_squares",
+                "algorithm": "squeezellm_gradients_upstream",
+                "source": SQUEEZELLM_GRADIENTS_SOURCE,
                 "layers": layers,
-                "num_examples": len(token_samples),
-                "sequence_length": int(token_samples[0].shape[1]),
+                "num_examples": len(dataloader),
+                "sequence_length": int(dataloader[0][0].shape[1]),
                 "seed": 0,
             },
             indent=2,
@@ -113,7 +139,10 @@ def collect_squeezellm_codebooks(
 
     metadata = {
         "algorithm": "squeezellm_direct_upstream_dense_fisher_kmeans",
-        "source": "SqueezeLLM/quantization/nuq.py",
+        "source": (
+            SQUEEZELLM_GRADIENTS_SOURCE
+            + " + SqueezeLLM/quantization/nuq.py"
+        ),
         "bits": bits,
         "fisher": str(sensitivity_store.path),
         "sparsity": 0.0,
@@ -153,4 +182,8 @@ def collect_squeezellm_codebooks(
     store.mark_complete()
 
 
-__all__ = ["collect_squeezellm_codebooks", "collect_squeezellm_fisher"]
+__all__ = [
+    "collect_squeezellm_codebooks",
+    "collect_squeezellm_fisher",
+    "load_squeezellm_fisher_data",
+]

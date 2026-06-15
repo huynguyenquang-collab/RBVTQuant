@@ -19,6 +19,9 @@ echo "Repository: $ROOT_DIR"
 echo "Python: $PYTHON_VERSION"
 echo "Virtual environment: $VENV_DIR"
 
+echo "Initializing upstream repositories ..."
+git submodule update --init --recursive
+
 if [ ! -d /content ]; then
   echo "Warning: /content is missing; this does not look like a Google Colab runtime."
 fi

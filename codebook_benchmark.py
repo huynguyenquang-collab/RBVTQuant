@@ -35,9 +35,13 @@ from quantizers.sensitivity_store import SensitivityStore
 from quantizers.squeezellm_collector import (
     collect_squeezellm_codebooks,
     collect_squeezellm_fisher,
+    load_squeezellm_fisher_data,
 )
 from quantizers.upstream_calibration import load_upstream_c4_tokens
-from quantizers.upstream_imports import load_leanquant_upstream
+from quantizers.upstream_imports import (
+    SQUEEZELLM_GRADIENTS_SOURCE,
+    load_leanquant_upstream,
+)
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
 
 
@@ -328,9 +332,19 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         f"seed={args.seed}"
     )
     if args.resume and summary_path.exists():
-        print(f"Reusing completed run: {summary_path}")
-        print(f"Done. run={run_id} | resumed=True")
-        return json.loads(summary_path.read_text(encoding="utf-8"))
+        cached_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        source_matches = (
+            codebook_name != "squeezellm"
+            or cached_summary.get("codebook_source") == SQUEEZELLM_GRADIENTS_SOURCE
+        )
+        if source_matches:
+            print(f"Reusing completed run: {summary_path}")
+            print(f"Done. run={run_id} | resumed=True")
+            return cached_summary
+        print(
+            "Ignoring completed SqueezeLLM run from an older gradient source: "
+            f"{summary_path}"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     hf_token = resolve_hf_token()
@@ -377,17 +391,22 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     )
     cache_root = Path(args.statistics_cache_dir or Path(args.output_root) / "_statistics")
     model_slug = build_model_slug(args.model_path)
+    cache_version = (
+        "gradients_5f2a166"
+        if codebook_name == "squeezellm"
+        else "direct_upstream"
+    )
     codebook_store = CodebookStore(
         cache_root
         / "codebooks"
         / model_slug
-        / f"{codebook_name}_{bits}bit_direct_upstream"
+        / f"{codebook_name}_{bits}bit_{cache_version}"
     )
     hessian_store = HessianStore(
         cache_root
         / "hessian"
         / model_slug
-        / f"{codebook_name}_{bits}bit_direct_upstream"
+        / f"{codebook_name}_{bits}bit_{cache_version}"
     )
 
     sensitivity_path = None
@@ -430,6 +449,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
                 / (
                     f"c4_n{args.squeezellm_fisher_samples}"
                     f"_len{args.squeezellm_fisher_length}_seed0"
+                    "_gradients_5f2a166"
                 )
             )
             fisher_manifest = fisher_path / "manifest.json"
@@ -439,21 +459,22 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
                     fisher_manifest.read_text(encoding="utf-8")
                 ).get("complete", False)
             if not fisher_complete:
-                print("Preparing upstream SqueezeLLM Fisher calibration tokens ...")
-                fisher_samples = load_upstream_c4_tokens(
-                    tokenizer=tokenizer,
-                    n_samples=args.squeezellm_fisher_samples,
-                    seqlen=args.squeezellm_fisher_length,
-                    seed=0,
-                    cache_dir=cache_root / "calibration",
+                print(
+                    "Preparing Fisher data with "
+                    "SqueezeLLM-gradients/datautils.py ..."
+                )
+                fisher_dataloader = load_squeezellm_fisher_data(
+                    model_path=args.model_path,
+                    num_examples=args.squeezellm_fisher_samples,
+                    sequence_length=args.squeezellm_fisher_length,
                 )
                 collect_squeezellm_fisher(
                     model=model,
-                    token_samples=fisher_samples,
+                    dataloader=fisher_dataloader,
                     output_dir=fisher_path,
                     device=args.device,
                 )
-                del fisher_samples
+                del fisher_dataloader
             sensitivity_path = str(fisher_path)
         sensitivity_mode = "fisher_checkpoint"
 
@@ -574,6 +595,11 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         "bits": bits,
         "method": method,
         "sensitivity_mode": sensitivity_mode,
+        "codebook_source": (
+            SQUEEZELLM_GRADIENTS_SOURCE
+            if codebook_name == "squeezellm"
+            else "LeanQuant/lean_quantizer.py"
+        ),
         "quantization": quantization,
         "calibration": {
             "dataset": args.calib_dataset,
