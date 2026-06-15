@@ -390,7 +390,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         cache_root / "codebooks" / model_slug / f"{codebook_name}_{bits}bit"
     )
     hessian_store = HessianStore(
-        cache_root / "hessian" / model_slug / f"{codebook_name}_shared"
+        cache_root / "hessian" / model_slug / f"{codebook_name}_{bits}bit"
     )
 
     sensitivity_path = None
