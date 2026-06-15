@@ -1,0 +1,2 @@
+# Keep transitive dependencies from replacing the server-compatible PyTorch wheel.
+torch==2.5.1

@@ -8,9 +8,9 @@ cd "$ROOT_DIR"
 
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-PYTORCH_VERSION="${PYTORCH_VERSION:-2.7.1}"
-PYTORCH_CUDA_RUNTIME="${PYTORCH_CUDA_RUNTIME:-12.6}"
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
+PYTORCH_VERSION="${PYTORCH_VERSION:-2.5.1}"
+PYTORCH_CUDA_RUNTIME="${PYTORCH_CUDA_RUNTIME:-12.1}"
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
 CACHE_ROOT="${CACHE_ROOT:-$ROOT_DIR/.cache}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE_ROOT/uv}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-$CACHE_ROOT/pip}"
@@ -78,23 +78,23 @@ then
   TORCH_MATCHES=1
 fi
 
-if [ "$TORCH_MATCHES" = "1" ]; then
-  echo "Reusing compatible PyTorch installation."
-else
-  echo "Installing CUDA-compatible PyTorch ..."
-  "$UV_BIN" pip install \
-    --python "$VENV_DIR/bin/python" \
-    --reinstall \
-    "torch==$PYTORCH_VERSION" \
-    --index-url "$PYTORCH_INDEX_URL" \
-    --extra-index-url https://pypi.org/simple
-fi
-
 echo "Installing requirements-server.txt ..."
 "$UV_BIN" pip install \
   --python "$VENV_DIR/bin/python" \
   --upgrade \
+  --constraints constraints-server.txt \
   -r requirements-server.txt
+
+if [ "$TORCH_MATCHES" = "1" ]; then
+  echo "Reusing compatible PyTorch installation."
+else
+  echo "Installing CUDA-compatible PyTorch after all other dependencies ..."
+  "$UV_BIN" pip install \
+    --python "$VENV_DIR/bin/python" \
+    --reinstall \
+    "torch==$PYTORCH_VERSION" \
+    --index-url "$PYTORCH_INDEX_URL"
+fi
 
 "$VENV_DIR/bin/python" - <<'PY'
 import sys

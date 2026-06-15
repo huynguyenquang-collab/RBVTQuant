@@ -62,11 +62,12 @@ bash bash/run_server_leanquant.sh
 ```
 
 The server runner stores outputs under `outputs/leanquant_server`, uses
-`.venv-server`, installs PyTorch `2.7.1` with CUDA `12.6`, and runs LeanQuant
+`.venv-server`, installs PyTorch `2.5.1` with CUDA `12.1`, and runs LeanQuant
 non-uniform for 3/4-bit RTN and RBVT. To repair an existing environment that
 installed a newer incompatible CUDA runtime, rerun:
 
 ```bash
+git pull
 bash bash/setup_server_leanquant.sh
 ```
 
