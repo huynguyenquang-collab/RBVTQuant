@@ -73,6 +73,17 @@ outlier range `1.8`, and `0.05%` Fisher-sensitive sparse values. Sparse values
 are excluded from RBVT and restored exactly after dense quantization. Reports
 are written under `outputs/squeezellm_server`.
 
+Run the upstream SqueezeLLM dense-only matrix with isolated outputs and
+statistics caches:
+
+```bash
+bash bash/run_server_squeezellm_dense_only.sh
+```
+
+This runs 4-bit and 3-bit RTN/RBVT without extracting sparse or sensitive
+weights. Its cache is stored under `outputs/squeezellm_dense_only_server` and
+cannot reuse the hybrid codebook or sparse-residual caches.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit

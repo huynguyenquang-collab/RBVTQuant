@@ -17,6 +17,7 @@ MODEL="${MODEL:-meta-llama/Llama-3.1-8B}"
 DEVICE="${DEVICE:-cuda:0}"
 BITS="${BITS:-4 3}"
 METHODS="${METHODS:-rtn rbvt}"
+SQUEEZELLM_MODE="${SQUEEZELLM_MODE:-hybrid}"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_server}"
 STATISTICS_CACHE_DIR="${STATISTICS_CACHE_DIR:-$OUTPUT_ROOT/_statistics}"
@@ -91,7 +92,7 @@ if [ "$RUN_TESTS" = "1" ]; then
 fi
 
 if [ "$RUN_PREFLIGHT" = "1" ]; then
-  "$PYTHON_BIN" - "$MODEL" "$MIN_GPU_MEMORY_GIB" "$ALLOW_LOW_VRAM" <<'PY'
+  "$PYTHON_BIN" - "$MODEL" "$MIN_GPU_MEMORY_GIB" "$ALLOW_LOW_VRAM" "$SQUEEZELLM_MODE" <<'PY'
 import sys
 
 import torch
@@ -100,6 +101,7 @@ from transformers import AutoConfig
 model = sys.argv[1]
 required_gib = float(sys.argv[2])
 allow_low_vram = sys.argv[3] == "1"
+mode = sys.argv[4]
 
 if sys.version_info[:2] != (3, 12):
     raise SystemExit(
@@ -128,19 +130,21 @@ from quantizers.upstream_imports import (
     load_squeezellm_gradients,
     load_squeezellm_kmeans,
     load_squeezellm_model_parse,
-    load_squeezellm_remove_outliers,
 )
 
 get_loaders, get_modules, square_grad_hook = load_squeezellm_gradients()
 kmeans_fit = load_squeezellm_kmeans()
 model_parse = load_squeezellm_model_parse()
-remove_outliers = load_squeezellm_remove_outliers()
 print("SqueezeLLM KMeans:", kmeans_fit.__module__)
 print("SqueezeLLM model parser:", model_parse.__name__)
-print("SqueezeLLM sparse extractor:", remove_outliers.__module__)
 print("SqueezeLLM gradients loader:", get_loaders.__module__)
 print("SqueezeLLM gradients modules:", get_modules.__upstream_source__)
 print("SqueezeLLM gradients hook:", square_grad_hook.__upstream_source__)
+if mode == "hybrid":
+    from quantizers.upstream_imports import load_squeezellm_remove_outliers
+
+    remove_outliers = load_squeezellm_remove_outliers()
+    print("SqueezeLLM sparse extractor:", remove_outliers.__module__)
 PY
 fi
 
@@ -170,6 +174,7 @@ COMMON_ARGS=(
   --kmeans-seed "$KMEANS_SEED"
   --squeezellm-fisher-samples "$SQUEEZELLM_FISHER_SAMPLES"
   --squeezellm-fisher-length "$SQUEEZELLM_FISHER_LENGTH"
+  --squeezellm-mode "$SQUEEZELLM_MODE"
   --squeezellm-outlier-range "$SQUEEZELLM_OUTLIER_RANGE"
   --squeezellm-sensitive-percent "$SQUEEZELLM_SENSITIVE_PERCENT"
   --statistics-cache-dir "$STATISTICS_CACHE_DIR"
@@ -212,7 +217,7 @@ LOG_FILE="$LOG_DIR/squeezellm_${TIMESTAMP}.log"
   echo "Device: $DEVICE"
   echo "Bits: $BITS"
   echo "Methods: $METHODS"
-  echo "SqueezeLLM mode: dense+sparse+sensitive"
+  echo "SqueezeLLM mode: $SQUEEZELLM_MODE"
   echo "SqueezeLLM Fisher: C4/${SQUEEZELLM_FISHER_SAMPLES}x${SQUEEZELLM_FISHER_LENGTH}"
   echo "SqueezeLLM outlier range: $SQUEEZELLM_OUTLIER_RANGE"
   echo "SqueezeLLM sensitive values: $SQUEEZELLM_SENSITIVE_PERCENT%"

@@ -50,6 +50,9 @@ DEFAULT_MODEL = "meta-llama/Llama-3.1-8B"
 SQUEEZELLM_HYBRID_SOURCE = (
     f"{SQUEEZELLM_GRADIENTS_SOURCE}+SqueezeLLM-dense-sparse-sensitive-v1"
 )
+SQUEEZELLM_DENSE_ONLY_SOURCE = (
+    f"{SQUEEZELLM_GRADIENTS_SOURCE}+SqueezeLLM-dense-only-v1"
+)
 LM_EVAL_TASKS = [
     "arc_challenge",
     "arc_easy",
@@ -359,18 +362,25 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         f"Model: {args.model_path} | output_dir={output_dir} | "
         f"seed={args.seed}"
     )
+    expected_codebook_source = (
+        SQUEEZELLM_DENSE_ONLY_SOURCE
+        if codebook_name == "squeezellm"
+        and args.squeezellm_mode == "dense-only"
+        else SQUEEZELLM_HYBRID_SOURCE
+        if codebook_name == "squeezellm"
+        else "LeanQuant/lean_quantizer.py"
+    )
     if args.resume and summary_path.exists():
         cached_summary = json.loads(summary_path.read_text(encoding="utf-8"))
         source_matches = (
-            codebook_name != "squeezellm"
-            or cached_summary.get("codebook_source") == SQUEEZELLM_HYBRID_SOURCE
+            cached_summary.get("codebook_source") == expected_codebook_source
         )
         if source_matches:
             print(f"Reusing completed run: {summary_path}")
             print(f"Done. run={run_id} | resumed=True")
             return cached_summary
         print(
-            "Ignoring completed SqueezeLLM run from an older gradient source: "
+            "Ignoring completed run from a different codebook mode/source: "
             f"{summary_path}"
         )
 
@@ -421,8 +431,12 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     model_slug = build_model_slug(args.model_path)
     cache_version = (
         (
-            f"hybrid_range{args.squeezellm_outlier_range}"
-            f"_sensitive{args.squeezellm_sensitive_percent}"
+            "dense_only"
+            if args.squeezellm_mode == "dense-only"
+            else (
+                f"hybrid_range{args.squeezellm_outlier_range}"
+                f"_sensitive{args.squeezellm_sensitive_percent}"
+            )
         )
         if codebook_name == "squeezellm"
         else "direct_upstream"
@@ -434,7 +448,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         / f"{codebook_name}_{bits}bit_{cache_version}"
     )
     sparse_store = None
-    if codebook_name == "squeezellm":
+    if codebook_name == "squeezellm" and args.squeezellm_mode == "hybrid":
         sparse_store = SparseResidualStore(
             cache_root
             / "sparse_residuals"
@@ -528,6 +542,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
             store=codebook_store,
             sparse_store=sparse_store,
             bits=bits,
+            mode=args.squeezellm_mode,
             outlier_range=args.squeezellm_outlier_range,
             sensitivity_percent=args.squeezellm_sensitive_percent,
         )
@@ -641,11 +656,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         "bits": bits,
         "method": method,
         "sensitivity_mode": sensitivity_mode,
-        "codebook_source": (
-            SQUEEZELLM_HYBRID_SOURCE
-            if codebook_name == "squeezellm"
-            else "LeanQuant/lean_quantizer.py"
-        ),
+        "codebook_source": expected_codebook_source,
         "quantization": quantization,
         "calibration": {
             "dataset": args.calib_dataset,
@@ -730,6 +741,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--squeezellm-fisher-samples", type=int, default=100)
     parser.add_argument("--squeezellm-fisher-length", type=int, default=512)
+    parser.add_argument(
+        "--squeezellm-mode",
+        choices=["dense-only", "hybrid"],
+        default="hybrid",
+    )
     parser.add_argument("--squeezellm-outlier-range", type=float, default=1.8)
     parser.add_argument("--squeezellm-sensitive-percent", type=float, default=0.05)
     parser.add_argument("--statistics-cache-dir", default=None)
@@ -804,8 +820,13 @@ def main():
         "true-sequential full Hessian; "
         f"SqueezeLLM=C4/{args.squeezellm_fisher_samples}x"
         f"{args.squeezellm_fisher_length}, Fisher seed=0, "
-        f"dense+sparse+sensitive, outlier_range={args.squeezellm_outlier_range}, "
-        f"sensitive={args.squeezellm_sensitive_percent}%"
+        f"mode={args.squeezellm_mode}"
+        + (
+            f", outlier_range={args.squeezellm_outlier_range}, "
+            f"sensitive={args.squeezellm_sensitive_percent}%"
+            if args.squeezellm_mode == "hybrid"
+            else ""
+        )
     )
     print(
         f"Evaluation: stride={args.eval_stride}, "

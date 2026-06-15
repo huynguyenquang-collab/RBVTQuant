@@ -135,46 +135,71 @@ def collect_squeezellm_codebooks(
     model,
     sensitivity_store: SensitivityStore,
     store: CodebookStore,
-    sparse_store: SparseResidualStore,
+    sparse_store: SparseResidualStore | None,
     bits: int,
+    mode: str = "hybrid",
     outlier_range: float = 1.8,
     sensitivity_percent: float = 0.05,
 ):
-    """Generate upstream dense+sparse+sensitive SqueezeLLM LUTs."""
+    """Generate upstream dense-only or dense+sparse+sensitive SqueezeLLM LUTs."""
 
+    if mode not in {"dense-only", "hybrid"}:
+        raise ValueError(f"Unsupported SqueezeLLM mode: {mode}")
+    if mode == "hybrid" and sparse_store is None:
+        raise ValueError("SqueezeLLM hybrid mode requires a sparse residual store")
     metadata = {
-        "algorithm": "squeezellm_upstream_dense_sparse_sensitive",
+        "algorithm": (
+            "squeezellm_upstream_dense_sparse_sensitive"
+            if mode == "hybrid"
+            else "squeezellm_upstream_dense_only"
+        ),
         "source": (
             SQUEEZELLM_GRADIENTS_SOURCE
             + " + SqueezeLLM/quantization/nuq.py"
         ),
         "bits": bits,
         "fisher": str(sensitivity_store.path),
-        "outlier_range": outlier_range,
-        "sensitivity_percent": sensitivity_percent,
+        "mode": mode,
     }
-    if store.complete and sparse_store.complete:
+    if mode == "hybrid":
+        metadata.update(
+            {
+                "outlier_range": outlier_range,
+                "sensitivity_percent": sensitivity_percent,
+            }
+        )
+    stores_complete = store.complete and (
+        mode == "dense-only" or sparse_store.complete
+    )
+    if stores_complete:
         store.validate(metadata)
-        sparse_store.validate(metadata)
-        print(f"Reusing SqueezeLLM hybrid cache: {store.root}")
+        if sparse_store is not None:
+            sparse_store.validate(metadata)
+        print(f"Reusing SqueezeLLM {mode} cache: {store.root}")
         return
     store.initialize(metadata)
-    sparse_store.initialize(metadata)
+    if sparse_store is not None:
+        sparse_store.initialize(metadata)
 
     kmeans_fit = load_squeezellm_kmeans()
-    remove_outliers = load_squeezellm_remove_outliers()
+    remove_outliers = (
+        load_squeezellm_remove_outliers()
+        if mode == "hybrid"
+        else None
+    )
     model_parse = load_squeezellm_model_parse()
     relative_names = model_parse.get_sequential("llama")
     short_names = model_parse.get_module_names("llama")
     workers = os.cpu_count() or 1
-    print(
-        "Building SqueezeLLM dense+sparse+sensitive LUTs | "
+    mode_details = (
         f"outlier_range={outlier_range} | sensitivity={sensitivity_percent}% | "
-        f"workers={workers}"
+        if mode == "hybrid"
+        else ""
     )
+    print(f"Building SqueezeLLM {mode} LUTs | {mode_details}workers={workers}")
     with Pool(workers) as pool:
         for layer_index, layer in enumerate(
-            tqdm(model.model.layers, desc="SqueezeLLM hybrid LUTs")
+            tqdm(model.model.layers, desc=f"SqueezeLLM {mode} LUTs")
         ):
             model_layer = {}
             gradient_layer = {}
@@ -185,30 +210,33 @@ def collect_squeezellm_codebooks(
                 full_name = f"model.layers.{layer_index}.{relative_name}"
                 weight = module.weight.detach().float().cpu()
                 gradient = sensitivity_store.get(full_name, weight.shape)
-                values = weight.numpy()
-                q1 = np.quantile(values, 0.25)
-                q3 = np.quantile(values, 0.75)
-                threshold = max(
-                    abs(q1 - outlier_range * (q3 - q1)),
-                    abs(q3 + outlier_range * (q3 - q1)),
-                )
                 model_layer[short_name] = weight
                 gradient_layer[short_name] = gradient
-                outlier_config[short_name] = threshold
+                if mode == "hybrid":
+                    values = weight.numpy()
+                    q1 = np.quantile(values, 0.25)
+                    q3 = np.quantile(values, 0.75)
+                    outlier_config[short_name] = max(
+                        abs(q1 - outlier_range * (q3 - q1)),
+                        abs(q3 + outlier_range * (q3 - q1)),
+                    )
                 full_names[short_name] = full_name
 
-            sparse_lists = remove_outliers(
-                model=model_layer,
-                sensitivity=sensitivity_percent,
-                outlier_config=outlier_config,
-                gradients=gradient_layer,
-            )[0]
+            sparse_lists = None
+            if mode == "hybrid":
+                sparse_lists = remove_outliers(
+                    model=model_layer,
+                    sensitivity=sensitivity_percent,
+                    outlier_config=outlier_config,
+                    gradients=gradient_layer,
+                )[0]
 
             for sparse_index, short_name in enumerate(short_names):
                 full_name = full_names[short_name]
                 dense_weight = model_layer[short_name]
                 gradient = gradient_layer[short_name]
-                sparse_store.put(full_name, sparse_lists[sparse_index])
+                if sparse_store is not None:
+                    sparse_store.put(full_name, sparse_lists[sparse_index])
                 tasks = []
                 for row, gradient_row in zip(
                     dense_weight.numpy(),
@@ -225,7 +253,8 @@ def collect_squeezellm_codebooks(
                 store.put(full_name, torch.sort(centers, dim=1).values.unsqueeze(1))
 
     store.mark_complete()
-    sparse_store.mark_complete()
+    if sparse_store is not None:
+        sparse_store.mark_complete()
 
 
 __all__ = [

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import torch
+import torch.nn as nn
 
 from quantizers.base_codebook import CodebookContext
 from quantizers.codebook_factory import get_codebook
+from quantizers.codebook_store import CodebookStore
 from quantizers.hessian_store import HessianStore
 from quantizers.rbvt import apply_rbvt
+from quantizers.squeezellm_collector import collect_squeezellm_codebooks
 from quantizers.sparse_residual_store import SparseResidualStore
 
 
@@ -107,6 +111,96 @@ class CodebookAdapterTest(unittest.TestCase):
         )
         self.assertEqual(stats.flips, 0)
         self.assertTrue(torch.equal(masked_weight, result.W_dequant.float()))
+
+    def test_squeezellm_dense_only_does_not_extract_sparse_values(self):
+        class FakeLayer:
+            def __init__(self):
+                self.linear = nn.Linear(6, 3, bias=False)
+
+            def get_submodule(self, name):
+                self.assert_name(name)
+                return self.linear
+
+            @staticmethod
+            def assert_name(name):
+                if name != "linear":
+                    raise AssertionError(name)
+
+        class FakeModel:
+            def __init__(self):
+                self.model = type("Inner", (), {"layers": [FakeLayer()]})()
+
+        class FakeSensitivity:
+            path = "fisher"
+
+            @staticmethod
+            def get(_name, shape):
+                return torch.ones(shape)
+
+        class FakeModelParse:
+            @staticmethod
+            def get_sequential(_model_type):
+                return ["linear"]
+
+            @staticmethod
+            def get_module_names(_model_type):
+                return ["linear"]
+
+        class SerialPool:
+            def __init__(self, _workers):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def imap(function, tasks):
+                return map(function, tasks)
+
+        def fake_kmeans(task):
+            row, _sample_weight, clusters = task
+            centers = torch.linspace(
+                float(row.min()),
+                float(row.max()),
+                clusters,
+            ).numpy()
+            return centers, None
+
+        with TemporaryDirectory() as directory:
+            store = CodebookStore(directory)
+            with (
+                patch(
+                    "quantizers.squeezellm_collector.load_squeezellm_kmeans",
+                    return_value=fake_kmeans,
+                ),
+                patch(
+                    "quantizers.squeezellm_collector.load_squeezellm_model_parse",
+                    return_value=FakeModelParse,
+                ),
+                patch(
+                    "quantizers.squeezellm_collector.load_squeezellm_remove_outliers"
+                ) as remove_outliers,
+                patch("quantizers.squeezellm_collector.Pool", SerialPool),
+            ):
+                collect_squeezellm_codebooks(
+                    model=FakeModel(),
+                    sensitivity_store=FakeSensitivity(),
+                    store=store,
+                    sparse_store=None,
+                    bits=4,
+                    mode="dense-only",
+                )
+
+            remove_outliers.assert_not_called()
+            self.assertTrue(store.complete)
+            self.assertEqual(store.metadata["mode"], "dense-only")
+            self.assertEqual(
+                store.get("model.layers.0.linear").shape,
+                (3, 1, 16),
+            )
 
 
 if __name__ == "__main__":
