@@ -61,6 +61,16 @@ export HF_TOKEN=<hugging-face-token>
 bash bash/run_server_leanquant.sh
 ```
 
+Run the full SqueezeLLM matrix on a Linux GPU server:
+
+```bash
+export HF_TOKEN=<hugging-face-token>
+bash bash/run_server_squeezellm.sh
+```
+
+This runs 4-bit and 3-bit RTN/RBVT with `rbvt-lambda=1.0` and writes the
+combined CSV/Markdown report under `outputs/squeezellm_server`.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
