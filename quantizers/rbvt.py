@@ -54,6 +54,7 @@ def apply_rbvt(
     gap_floor: float = 1e-8,
     relax_eps: float = 1e-12,
     strict_descent: bool = True,
+    candidate_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, RBVTStats]:
     if rbvt_lambda < 0.0:
         raise ValueError(f"rbvt_lambda must be non-negative, got {rbvt_lambda}")
@@ -71,6 +72,13 @@ def apply_rbvt(
     Wq_full = qres.W_dequant.to(device).float()
     indices_full = qres.indices.to(device)
     Wq_rbvt = Wq_full.clone()
+    if candidate_mask is not None:
+        candidate_mask = candidate_mask.to(device=device, dtype=torch.bool)
+        if candidate_mask.shape != W_fp.shape:
+            raise ValueError(
+                f"candidate_mask has shape {tuple(candidate_mask.shape)}, "
+                f"expected {tuple(W_fp.shape)}"
+            )
 
     total_flips = 0
     total_candidates = 0
@@ -122,6 +130,8 @@ def apply_rbvt(
 
         sign_aligned = (b.unsqueeze(1) * v) > 0
         admissible = feasible & gap_ok & sign_aligned & (r > relax_eps)
+        if candidate_mask is not None:
+            admissible &= candidate_mask[r0:r1]
         rho = q / (r + relax_eps)
 
         for rr in range(rc):

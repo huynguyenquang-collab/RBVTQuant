@@ -112,6 +112,13 @@ def load_squeezellm_model_parse():
     return module
 
 
+def load_squeezellm_remove_outliers():
+    with _python_path(SQUEEZELLM_ROOT):
+        module = importlib.import_module("squeezellm.outliers")
+    _verify_source(module, SQUEEZELLM_ROOT)
+    return module.remove_outliers
+
+
 def load_squeezellm_gradients():
     """Load the exact C4 loader and Fisher helpers from SqueezeLLM-gradients."""
 
@@ -137,4 +144,5 @@ __all__ = [
     "load_squeezellm_gradients",
     "load_squeezellm_kmeans",
     "load_squeezellm_model_parse",
+    "load_squeezellm_remove_outliers",
 ]

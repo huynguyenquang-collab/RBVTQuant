@@ -138,6 +138,7 @@ fi
   quantizers/codebook_factory.py \
   quantizers/leanquant_collector.py \
   quantizers/sensitivity_store.py \
+  quantizers/sparse_residual_store.py \
   quantizers/squeezellm_collector.py \
   quantizers/upstream_imports.py \
   quantizers/upstream_calibration.py \

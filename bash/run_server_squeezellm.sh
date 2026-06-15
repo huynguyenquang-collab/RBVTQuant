@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Resumable SqueezeLLM benchmark for a Linux GPU server:
-# SqueezeLLM dense-only x 3/4-bit x RTN/RBVT on Llama-3.1-8B.
+# SqueezeLLM dense+sparse+sensitive x 3/4-bit x RTN/RBVT on Llama-3.1-8B.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -36,6 +36,8 @@ KMEANS_SEED="${KMEANS_SEED:-0}"
 SQUEEZELLM_SENSITIVITY="${SQUEEZELLM_SENSITIVITY:-}"
 SQUEEZELLM_FISHER_SAMPLES="${SQUEEZELLM_FISHER_SAMPLES:-100}"
 SQUEEZELLM_FISHER_LENGTH="${SQUEEZELLM_FISHER_LENGTH:-512}"
+SQUEEZELLM_OUTLIER_RANGE="${SQUEEZELLM_OUTLIER_RANGE:-1.8}"
+SQUEEZELLM_SENSITIVE_PERCENT="${SQUEEZELLM_SENSITIVE_PERCENT:-0.05}"
 
 # Fixed by request so all SqueezeLLM RBVT rows use the same setting.
 RBVT_LAMBDA="1.0"
@@ -126,13 +128,16 @@ from quantizers.upstream_imports import (
     load_squeezellm_gradients,
     load_squeezellm_kmeans,
     load_squeezellm_model_parse,
+    load_squeezellm_remove_outliers,
 )
 
 get_loaders, get_modules, square_grad_hook = load_squeezellm_gradients()
 kmeans_fit = load_squeezellm_kmeans()
 model_parse = load_squeezellm_model_parse()
+remove_outliers = load_squeezellm_remove_outliers()
 print("SqueezeLLM KMeans:", kmeans_fit.__module__)
 print("SqueezeLLM model parser:", model_parse.__name__)
+print("SqueezeLLM sparse extractor:", remove_outliers.__module__)
 print("SqueezeLLM gradients loader:", get_loaders.__module__)
 print("SqueezeLLM gradients modules:", get_modules.__upstream_source__)
 print("SqueezeLLM gradients hook:", square_grad_hook.__upstream_source__)
@@ -165,6 +170,8 @@ COMMON_ARGS=(
   --kmeans-seed "$KMEANS_SEED"
   --squeezellm-fisher-samples "$SQUEEZELLM_FISHER_SAMPLES"
   --squeezellm-fisher-length "$SQUEEZELLM_FISHER_LENGTH"
+  --squeezellm-outlier-range "$SQUEEZELLM_OUTLIER_RANGE"
+  --squeezellm-sensitive-percent "$SQUEEZELLM_SENSITIVE_PERCENT"
   --statistics-cache-dir "$STATISTICS_CACHE_DIR"
   --rbvt-lambda "$RBVT_LAMBDA"
   --rbvt-topk "$RBVT_TOPK"
@@ -205,8 +212,10 @@ LOG_FILE="$LOG_DIR/squeezellm_${TIMESTAMP}.log"
   echo "Device: $DEVICE"
   echo "Bits: $BITS"
   echo "Methods: $METHODS"
-  echo "SqueezeLLM mode: dense-only"
+  echo "SqueezeLLM mode: dense+sparse+sensitive"
   echo "SqueezeLLM Fisher: C4/${SQUEEZELLM_FISHER_SAMPLES}x${SQUEEZELLM_FISHER_LENGTH}"
+  echo "SqueezeLLM outlier range: $SQUEEZELLM_OUTLIER_RANGE"
+  echo "SqueezeLLM sensitive values: $SQUEEZELLM_SENSITIVE_PERCENT%"
   echo "RBVT lambda: $RBVT_LAMBDA"
   echo "Worker threads: OMP=$OMP_NUM_THREADS | MKL=$MKL_NUM_THREADS"
   echo "RBVT calibration: C4/${N_CALIB}x${MAX_LENGTH}"

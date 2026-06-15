@@ -11,6 +11,7 @@ from quantizers.base_codebook import CodebookContext
 from quantizers.codebook_factory import get_codebook
 from quantizers.hessian_store import HessianStore
 from quantizers.rbvt import apply_rbvt
+from quantizers.sparse_residual_store import SparseResidualStore
 
 
 class CodebookAdapterTest(unittest.TestCase):
@@ -75,6 +76,37 @@ class CodebookAdapterTest(unittest.TestCase):
                 torch.eye(3),
             )
             self.assertTrue(store.has("model.layers.0.self_attn.q_proj"))
+
+    def test_sparse_residual_store_round_trip(self):
+        with TemporaryDirectory() as directory:
+            store = SparseResidualStore(directory)
+            store.initialize({"mode": "hybrid"})
+            residual = torch.zeros(3, 5)
+            residual[0, 2] = 1.25
+            residual[2, 4] = -0.75
+            store.put("model.layers.0.self_attn.q_proj", residual)
+            store.mark_complete()
+
+            restored = store.get("model.layers.0.self_attn.q_proj")
+            self.assertTrue(torch.equal(restored, residual))
+
+    def test_rbvt_candidate_mask_excludes_sparse_positions(self):
+        codebook = get_codebook("squeezellm", 3)
+        centers = torch.linspace(-1.0, 1.0, 8).reshape(1, 1, 8).repeat(5, 1, 1)
+        codebook.set_context(CodebookContext(precomputed_centers=centers))
+        result = codebook.quantize(self.weight, row_chunk=3)
+        candidate_mask = torch.zeros_like(self.weight, dtype=torch.bool)
+
+        masked_weight, stats = apply_rbvt(
+            W_fp=self.weight,
+            qres=result,
+            mu=self.mean,
+            sigma_ii=self.variance,
+            candidate_mask=candidate_mask,
+            row_chunk=2,
+        )
+        self.assertEqual(stats.flips, 0)
+        self.assertTrue(torch.equal(masked_weight, result.W_dequant.float()))
 
 
 if __name__ == "__main__":

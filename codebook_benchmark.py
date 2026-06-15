@@ -32,6 +32,7 @@ from quantizers.hessian_store import HessianStore
 from quantizers.codebook_factory import get_codebook
 from quantizers.leanquant_collector import collect_leanquant_codebooks
 from quantizers.sensitivity_store import SensitivityStore
+from quantizers.sparse_residual_store import SparseResidualStore
 from quantizers.squeezellm_collector import (
     collect_squeezellm_codebooks,
     collect_squeezellm_fisher,
@@ -46,6 +47,9 @@ from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
 
 
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B"
+SQUEEZELLM_HYBRID_SOURCE = (
+    f"{SQUEEZELLM_GRADIENTS_SOURCE}+SqueezeLLM-dense-sparse-sensitive-v1"
+)
 LM_EVAL_TASKS = [
     "arc_challenge",
     "arc_easy",
@@ -128,6 +132,7 @@ def quantize_with_codebook(
     gap_floor: float,
     strict_descent: bool,
     codebook_store: CodebookStore,
+    sparse_store: SparseResidualStore | None = None,
 ) -> dict:
     linears: List[Tuple[str, nn.Module]] = [
         (name, module)
@@ -154,17 +159,28 @@ def quantize_with_codebook(
         "objective_before": 0.0,
         "objective_after": 0.0,
         "variance_increase": 0.0,
+        "sparse_values": 0,
     }
 
     for name, module in tqdm(linears, desc="Quantizing layers"):
         weight = module.weight.data
+        sparse_residual = None
+        sparse_mask = None
+        dense_weight = weight
+        if sparse_store is not None:
+            sparse_residual = sparse_store.get(name, device=weight.device).to(weight.dtype)
+            sparse_mask = sparse_residual != 0
+            dense_weight = weight - sparse_residual
+            totals["sparse_values"] += int(sparse_mask.sum().item())
         cached_centers = codebook_store.get(name)
         codebook.set_context(
             CodebookContext(
                 precomputed_centers=cached_centers,
             )
         )
-        quantized = codebook.quantize(weight, row_chunk=row_chunk)
+        quantized = codebook.quantize(dense_weight, row_chunk=row_chunk)
+        if sparse_mask is not None:
+            quantized.W_dequant[sparse_mask] = 0
         output = quantized.W_dequant
 
         if method == "rbvt":
@@ -172,7 +188,7 @@ def quantize_with_codebook(
                 raise RuntimeError(f"Missing activation mean for RBVT layer {name!r}")
             sigma = variances.get(name)
             output, stats = apply_rbvt(
-                W_fp=weight,
+                W_fp=dense_weight,
                 qres=quantized,
                 mu=means[name].to(weight.device),
                 sigma_ii=sigma.to(weight.device) if sigma is not None else None,
@@ -181,10 +197,16 @@ def quantize_with_codebook(
                 row_chunk=row_chunk,
                 gap_floor=gap_floor,
                 strict_descent=strict_descent,
+                candidate_mask=~sparse_mask if sparse_mask is not None else None,
             )
             for key in totals:
+                if key == "sparse_values":
+                    continue
                 totals[key] += getattr(stats, key)
 
+        if sparse_residual is not None:
+            output[sparse_mask] = 0
+            output = output + sparse_residual
         module.weight.data = output.to(weight.dtype)
         codebook.set_context(None)
         del quantized, output, weight
@@ -208,6 +230,11 @@ def quantize_with_codebook(
         )
     else:
         print("RTN summary | plain nearest-codeword quantization completed.")
+    if sparse_store is not None:
+        print(
+            "SqueezeLLM sparse summary | "
+            f"restored_values={totals['sparse_values']}"
+        )
 
     result = {
         "method": method,
@@ -215,6 +242,7 @@ def quantize_with_codebook(
         "skip_lmhead": skip_lmhead,
         "codebook": codebook.name,
         "bits": codebook.bits,
+        "sparse_values": totals["sparse_values"],
     }
     if method == "rbvt":
         result.update(totals)
@@ -335,7 +363,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         cached_summary = json.loads(summary_path.read_text(encoding="utf-8"))
         source_matches = (
             codebook_name != "squeezellm"
-            or cached_summary.get("codebook_source") == SQUEEZELLM_GRADIENTS_SOURCE
+            or cached_summary.get("codebook_source") == SQUEEZELLM_HYBRID_SOURCE
         )
         if source_matches:
             print(f"Reusing completed run: {summary_path}")
@@ -392,7 +420,10 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     cache_root = Path(args.statistics_cache_dir or Path(args.output_root) / "_statistics")
     model_slug = build_model_slug(args.model_path)
     cache_version = (
-        "gradients_5f2a166"
+        (
+            f"hybrid_range{args.squeezellm_outlier_range}"
+            f"_sensitive{args.squeezellm_sensitive_percent}"
+        )
         if codebook_name == "squeezellm"
         else "direct_upstream"
     )
@@ -402,6 +433,17 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         / model_slug
         / f"{codebook_name}_{bits}bit_{cache_version}"
     )
+    sparse_store = None
+    if codebook_name == "squeezellm":
+        sparse_store = SparseResidualStore(
+            cache_root
+            / "sparse_residuals"
+            / model_slug
+            / (
+                f"squeezellm_{bits}bit_range{args.squeezellm_outlier_range}"
+                f"_sensitive{args.squeezellm_sensitive_percent}"
+            )
+        )
     hessian_store = HessianStore(
         cache_root
         / "hessian"
@@ -484,7 +526,10 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
             model=model,
             sensitivity_store=sensitivity_store,
             store=codebook_store,
+            sparse_store=sparse_store,
             bits=bits,
+            outlier_range=args.squeezellm_outlier_range,
+            sensitivity_percent=args.squeezellm_sensitive_percent,
         )
     print(
         f"Loaded quantizer: {codebook} | sensitivity={sensitivity_mode} | "
@@ -541,6 +586,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         gap_floor=args.gap_floor,
         strict_descent=args.strict_descent,
         codebook_store=codebook_store,
+        sparse_store=sparse_store,
     )
 
     print(f"Saving to {output_dir} ...")
@@ -596,7 +642,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         "method": method,
         "sensitivity_mode": sensitivity_mode,
         "codebook_source": (
-            SQUEEZELLM_GRADIENTS_SOURCE
+            SQUEEZELLM_HYBRID_SOURCE
             if codebook_name == "squeezellm"
             else "LeanQuant/lean_quantizer.py"
         ),
@@ -684,6 +730,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--squeezellm-fisher-samples", type=int, default=100)
     parser.add_argument("--squeezellm-fisher-length", type=int, default=512)
+    parser.add_argument("--squeezellm-outlier-range", type=float, default=1.8)
+    parser.add_argument("--squeezellm-sensitive-percent", type=float, default=0.05)
     parser.add_argument("--statistics-cache-dir", default=None)
 
     parser.add_argument("--rbvt-lambda", type=float, default=1.0)
@@ -721,6 +769,10 @@ def main():
         )
     if args.rbvt_lambda < 0.0:
         raise ValueError("--rbvt-lambda must be non-negative")
+    if args.squeezellm_outlier_range <= 0.0:
+        raise ValueError("--squeezellm-outlier-range must be positive")
+    if not 0.0 < args.squeezellm_sensitive_percent < 100.0:
+        raise ValueError("--squeezellm-sensitive-percent must be between 0 and 100")
     if args.group_size != -1:
         raise ValueError(
             "Exact upstream LeanQuant/SqueezeLLM codebooks require --group-size=-1"
@@ -751,7 +803,9 @@ def main():
         f"LeanQuant=C4/{args.n_calib}x{args.max_length}, seed=0, "
         "true-sequential full Hessian; "
         f"SqueezeLLM=C4/{args.squeezellm_fisher_samples}x"
-        f"{args.squeezellm_fisher_length}, Fisher seed=0"
+        f"{args.squeezellm_fisher_length}, Fisher seed=0, "
+        f"dense+sparse+sensitive, outlier_range={args.squeezellm_outlier_range}, "
+        f"sensitive={args.squeezellm_sensitive_percent}%"
     )
     print(
         f"Evaluation: stride={args.eval_stride}, "

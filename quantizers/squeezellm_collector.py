@@ -14,11 +14,13 @@ from tqdm import tqdm
 
 from .codebook_store import CodebookStore
 from .sensitivity_store import SensitivityStore
+from .sparse_residual_store import SparseResidualStore
 from .upstream_imports import (
     SQUEEZELLM_GRADIENTS_SOURCE,
     load_squeezellm_gradients,
     load_squeezellm_kmeans,
     load_squeezellm_model_parse,
+    load_squeezellm_remove_outliers,
 )
 
 
@@ -133,53 +135,97 @@ def collect_squeezellm_codebooks(
     model,
     sensitivity_store: SensitivityStore,
     store: CodebookStore,
+    sparse_store: SparseResidualStore,
     bits: int,
+    outlier_range: float = 1.8,
+    sensitivity_percent: float = 0.05,
 ):
-    """Generate dense-only LUTs with SqueezeLLM/quantization/nuq.py::kmeans_fit."""
+    """Generate upstream dense+sparse+sensitive SqueezeLLM LUTs."""
 
     metadata = {
-        "algorithm": "squeezellm_direct_upstream_dense_fisher_kmeans",
+        "algorithm": "squeezellm_upstream_dense_sparse_sensitive",
         "source": (
             SQUEEZELLM_GRADIENTS_SOURCE
             + " + SqueezeLLM/quantization/nuq.py"
         ),
         "bits": bits,
         "fisher": str(sensitivity_store.path),
-        "sparsity": 0.0,
+        "outlier_range": outlier_range,
+        "sensitivity_percent": sensitivity_percent,
     }
-    if store.complete:
+    if store.complete and sparse_store.complete:
         store.validate(metadata)
-        print(f"Reusing SqueezeLLM upstream codebook cache: {store.root}")
+        sparse_store.validate(metadata)
+        print(f"Reusing SqueezeLLM hybrid cache: {store.root}")
         return
     store.initialize(metadata)
+    sparse_store.initialize(metadata)
 
     kmeans_fit = load_squeezellm_kmeans()
-    linears = _squeezellm_linears(model)
+    remove_outliers = load_squeezellm_remove_outliers()
+    model_parse = load_squeezellm_model_parse()
+    relative_names = model_parse.get_sequential("llama")
+    short_names = model_parse.get_module_names("llama")
     workers = os.cpu_count() or 1
     print(
-        "Building SqueezeLLM dense-only LUTs with upstream nuq.py | "
-        f"layers={len(linears)} | workers={workers}"
+        "Building SqueezeLLM dense+sparse+sensitive LUTs | "
+        f"outlier_range={outlier_range} | sensitivity={sensitivity_percent}% | "
+        f"workers={workers}"
     )
     with Pool(workers) as pool:
-        for layer_name, module in tqdm(linears, desc="SqueezeLLM upstream LUTs"):
-            weight = module.weight.detach().float().cpu()
-            sensitivity = sensitivity_store.get(layer_name, weight.shape)
-            weight_np = weight.numpy()
-            sensitivity_np = sensitivity.numpy()
-            tasks = []
-            for row, gradient_row in zip(weight_np, sensitivity_np):
-                sample_weight = gradient_row * (row != 0)
-                if np.sum(sample_weight) == 0:
-                    sample_weight = np.ones_like(sample_weight)
-                tasks.append((row.reshape(-1, 1), sample_weight, 2**bits))
-            results = list(pool.imap(kmeans_fit, tasks))
-            centers = torch.from_numpy(
-                np.stack([result[0] for result in results])
-            ).float()
-            centers = torch.sort(centers, dim=1).values
-            store.put(layer_name, centers.unsqueeze(1))
+        for layer_index, layer in enumerate(
+            tqdm(model.model.layers, desc="SqueezeLLM hybrid LUTs")
+        ):
+            model_layer = {}
+            gradient_layer = {}
+            outlier_config = {}
+            full_names = {}
+            for short_name, relative_name in zip(short_names, relative_names):
+                module = layer.get_submodule(relative_name)
+                full_name = f"model.layers.{layer_index}.{relative_name}"
+                weight = module.weight.detach().float().cpu()
+                gradient = sensitivity_store.get(full_name, weight.shape)
+                values = weight.numpy()
+                q1 = np.quantile(values, 0.25)
+                q3 = np.quantile(values, 0.75)
+                threshold = max(
+                    abs(q1 - outlier_range * (q3 - q1)),
+                    abs(q3 + outlier_range * (q3 - q1)),
+                )
+                model_layer[short_name] = weight
+                gradient_layer[short_name] = gradient
+                outlier_config[short_name] = threshold
+                full_names[short_name] = full_name
+
+            sparse_lists = remove_outliers(
+                model=model_layer,
+                sensitivity=sensitivity_percent,
+                outlier_config=outlier_config,
+                gradients=gradient_layer,
+            )[0]
+
+            for sparse_index, short_name in enumerate(short_names):
+                full_name = full_names[short_name]
+                dense_weight = model_layer[short_name]
+                gradient = gradient_layer[short_name]
+                sparse_store.put(full_name, sparse_lists[sparse_index])
+                tasks = []
+                for row, gradient_row in zip(
+                    dense_weight.numpy(),
+                    gradient.numpy(),
+                ):
+                    sample_weight = gradient_row * (row != 0)
+                    if np.sum(sample_weight) == 0:
+                        sample_weight = np.ones_like(sample_weight)
+                    tasks.append((row.reshape(-1, 1), sample_weight, 2**bits))
+                results = list(pool.imap(kmeans_fit, tasks))
+                centers = torch.from_numpy(
+                    np.stack([result[0] for result in results])
+                ).float()
+                store.put(full_name, torch.sort(centers, dim=1).values.unsqueeze(1))
 
     store.mark_complete()
+    sparse_store.mark_complete()
 
 
 __all__ = [
