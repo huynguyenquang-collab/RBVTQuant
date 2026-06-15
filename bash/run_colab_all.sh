@@ -22,6 +22,12 @@ LEANQUANT_CODEBOOKS="${LEANQUANT_CODEBOOKS:-leanquant}"
 echo "=== RBVTQuant Colab end-to-end runner ==="
 echo "Repository: $ROOT_DIR"
 
+# Limit OpenMP threads to prevent "Thread creation failed" errors during Hessian collection
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+echo "Thread limits: OMP_NUM_THREADS=$OMP_NUM_THREADS"
+
 if [ "$RUN_SETUP" = "1" ]; then
   bash bash/setup_colab_codebooks.sh
 fi
