@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 
 import torch
 
 from quantizers.base_codebook import CodebookContext
 from quantizers.codebook_factory import get_codebook
+from quantizers.hessian_store import HessianStore
 from quantizers.rbvt import apply_rbvt
 
 
@@ -61,6 +63,18 @@ class CodebookAdapterTest(unittest.TestCase):
         codebook.set_context(CodebookContext())
         with self.assertRaisesRegex(RuntimeError, "upstream repository"):
             codebook.quantize(self.weight)
+
+    def test_hessian_store_has_tracks_cached_files(self):
+        with TemporaryDirectory() as directory:
+            store = HessianStore(directory)
+            store.initialize({"bits": 3})
+            self.assertFalse(store.has("model.layers.0.self_attn.q_proj"))
+
+            store.put(
+                "model.layers.0.self_attn.q_proj",
+                torch.eye(3),
+            )
+            self.assertTrue(store.has("model.layers.0.self_attn.q_proj"))
 
 
 if __name__ == "__main__":

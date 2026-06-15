@@ -55,6 +55,10 @@ class HessianStore:
     def _filename(layer_name: str) -> str:
         return layer_name.replace("/", "__").replace(".", "_") + ".pt"
 
+    def has(self, layer_name: str) -> bool:
+        filename = self._manifest.get("layers", {}).get(layer_name)
+        return filename is not None and (self.root / filename).exists()
+
     def put(self, layer_name: str, hessian: torch.Tensor):
         filename = self._filename(layer_name)
         torch.save(hessian.detach().float().cpu(), self.root / filename)
