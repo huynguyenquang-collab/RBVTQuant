@@ -8,9 +8,11 @@ cd "$ROOT_DIR"
 
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-PYTORCH_VERSION="${PYTORCH_VERSION:-2.5.1}"
-PYTORCH_CUDA_RUNTIME="${PYTORCH_CUDA_RUNTIME:-12.1}"
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+# These values are intentionally fixed for the supported server driver (535).
+# Do not inherit stale PYTORCH_* variables from the login shell.
+PYTORCH_VERSION="2.5.1"
+PYTORCH_CUDA_RUNTIME="12.1"
+PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
 CACHE_ROOT="${CACHE_ROOT:-$ROOT_DIR/.cache}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE_ROOT/uv}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-$CACHE_ROOT/pip}"
@@ -20,6 +22,7 @@ export PIP_CACHE_DIR
 
 echo "=== RBVTQuant server setup ==="
 echo "Repository: $ROOT_DIR"
+echo "Repository commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "Python: $PYTHON_VERSION"
 echo "PyTorch: $PYTORCH_VERSION"
 echo "PyTorch CUDA runtime: $PYTORCH_CUDA_RUNTIME"
