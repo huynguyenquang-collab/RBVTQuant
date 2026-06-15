@@ -57,6 +57,14 @@ export HF_DATASETS_CACHE
 export TRANSFORMERS_CACHE
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# LeanQuant parallelizes row-wise KMeans with multiprocessing. Each worker must
+# stay single-threaded or OpenMP/BLAS creates a multiplicative thread explosion.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export BLIS_NUM_THREADS=1
 
 if [ "$RUN_SETUP" = "1" ]; then
   VENV_DIR="$VENV_DIR" CACHE_ROOT="$CACHE_ROOT" \
@@ -186,6 +194,7 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "LeanQuant mode: non-uniform"
   echo "LeanQuant exponent: $LEANQUANT_EXPONENT"
   echo "LeanQuant percdamp: $LEANQUANT_PERCDAMP"
+  echo "LeanQuant worker threads: OMP=$OMP_NUM_THREADS | MKL=$MKL_NUM_THREADS"
   echo "Calibration: C4/${N_CALIB}x${MAX_LENGTH}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
