@@ -94,6 +94,16 @@ The sweep reuses the Fisher and LUT statistics under
 `outputs/squeezellm_dense_only_server/_statistics`, while each lambda keeps an
 independent output and run summary.
 
+Sweep LeanQuant RTN for 4-bit and 3-bit with exponent `2`, `3`, and `6`:
+
+```bash
+RUN_SETUP=0 bash bash/run_server_leanquant_exponent_sweep.sh
+```
+
+The sweep keeps per-exponent LeanQuant statistics under separate run folders
+and writes an aggregate report to
+`outputs/leanquant_exponent_sweep/benchmark_results.csv`.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
