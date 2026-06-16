@@ -46,7 +46,7 @@ nvidia-smi
 
 if [ -f .gitmodules ]; then
   echo "Initializing upstream submodules ..."
-  git submodule update --init --recursive
+  bash bash/ensure_upstream_submodules.sh
 fi
 
 mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR"

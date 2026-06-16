@@ -69,6 +69,8 @@ export NUMEXPR_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 
+bash bash/ensure_upstream_submodules.sh
+
 if [ "$RUN_SETUP" = "1" ]; then
   VENV_DIR="$VENV_DIR" CACHE_ROOT="$CACHE_ROOT" \
     bash bash/setup_server_leanquant.sh

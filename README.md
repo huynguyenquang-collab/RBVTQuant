@@ -51,6 +51,13 @@ Codebook benchmarks:
   `SqueezeLLM/quantization/nuq.py::kmeans_fit` directly. C4 sampling, Llama
   module selection, and squared-gradient accumulation are loaded directly from
   the pinned `SqueezeLLM-gradients` submodule at commit `5f2a166`.
+
+Fresh clones need the `SqueezeLLM-gradients` submodule. The setup and
+SqueezeLLM server runners initialize it automatically; manual initialization is:
+
+```bash
+git submodule update --init --recursive SqueezeLLM-gradients
+```
 - RTN and RBVT consume the same cached upstream grid/LUT. RBVT calibration and
   evaluation retain the settings used by `main.py`.
 
