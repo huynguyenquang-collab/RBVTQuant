@@ -127,6 +127,16 @@ RUN_SETUP=0 bash bash/run_server_leanquant_percdamp_sweep.sh
 The percdamp sweep writes an aggregate report to
 `outputs/leanquant_percdamp_sweep/benchmark_results.csv`.
 
+Run LeanQuant with the selected percdamp setting (`exponent=4.0`,
+`percdamp=0.15`) across Llama-3.1-8B, Mistral-7B-v0.3, and Qwen2.5-7B:
+
+```bash
+RUN_SETUP=0 bash bash/run_server_leanquant_percdamp015_multimodel.sh
+```
+
+This runs 4-bit and 3-bit RTN/RBVT for all three models and writes an aggregate
+report to `outputs/leanquant_percdamp015_multimodel/benchmark_results.csv`.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
