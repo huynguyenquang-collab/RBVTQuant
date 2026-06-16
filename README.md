@@ -104,6 +104,22 @@ The sweep keeps per-exponent LeanQuant statistics under separate run folders
 and writes an aggregate report to
 `outputs/leanquant_exponent_sweep/benchmark_results.csv`.
 
+Remove LeanQuant exponent-sweep outputs and caches:
+
+```bash
+CONFIRM=1 bash bash/clean_server_leanquant_exponent_sweep.sh
+```
+
+Sweep LeanQuant RTN for 4-bit and 3-bit with percdamp `0.01` and `0.15`
+while keeping exponent at its default `4.0`:
+
+```bash
+RUN_SETUP=0 bash bash/run_server_leanquant_percdamp_sweep.sh
+```
+
+The percdamp sweep writes an aggregate report to
+`outputs/leanquant_percdamp_sweep/benchmark_results.csv`.
+
 The server runner stores outputs under `outputs/leanquant_server`, uses
 `.venv-server`, installs PyTorch `2.12.0` and torchvision `0.27.0` from the
 official CUDA `12.6` wheel index, and runs LeanQuant non-uniform for 3/4-bit
