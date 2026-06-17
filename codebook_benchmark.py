@@ -6,6 +6,7 @@ import argparse
 import csv
 import gc
 import json
+import os
 import random
 import time
 from datetime import datetime
@@ -851,10 +852,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lm-eval-num-fewshot", type=int, default=None)
     parser.add_argument("--lm-eval-limit", type=float, default=None)
     parser.add_argument("--lm-eval-output-dir", default="./outputs/lm_eval_codebooks")
-    parser.add_argument("--use-wandb", dest="use_wandb", action="store_true", default=False)
+    parser.add_argument(
+        "--use-wandb",
+        dest="use_wandb",
+        action="store_true",
+        default=os.getenv("USE_WANDB", "0") == "1",
+    )
     parser.add_argument("--no-wandb", dest="use_wandb", action="store_false")
-    parser.add_argument("--wandb-project", default="rbvtquant")
-    parser.add_argument("--wandb-entity", default=None)
+    parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "rbvtquant"))
+    parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY") or None)
     return parser
 
 
