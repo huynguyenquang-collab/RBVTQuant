@@ -26,4 +26,16 @@ echo
 echo "=== lm-eval datasets compatibility check ==="
 "$PYTHON_BIN" lm_eval_dataset_smoke.py
 
+if [ -n "${LM_EVAL_TASKS:-}" ]; then
+  echo
+  echo "=== lm-eval task smoke test ==="
+  read -r -a LM_EVAL_TASK_ARRAY <<< "$LM_EVAL_TASKS"
+  "$PYTHON_BIN" lm_eval_smoke.py \
+    --model-path "${LM_EVAL_SMOKE_MODEL_PATH:-sshleifer/tiny-gpt2}" \
+    --device "${LM_EVAL_SMOKE_DEVICE:-cpu}" \
+    --tasks "${LM_EVAL_TASK_ARRAY[@]}" \
+    --limit "${LM_EVAL_SMOKE_LIMIT:-1}" \
+    --batch-size "${LM_EVAL_SMOKE_BATCH_SIZE:-1}"
+fi
+
 echo "Smoke tests passed."
