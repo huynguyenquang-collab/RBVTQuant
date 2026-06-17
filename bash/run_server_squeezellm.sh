@@ -60,6 +60,7 @@ LM_EVAL_NUM_FEWSHOT="${LM_EVAL_NUM_FEWSHOT:-}"
 LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 KEEP_MODEL="${KEEP_MODEL:-0}"
 CLEAN_STATISTICS_CACHE="${CLEAN_STATISTICS_CACHE:-0}"
+LM_EVAL_TASKS="${LM_EVAL_TASKS:-}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -344,6 +345,10 @@ fi
 if [ -n "$LM_EVAL_LIMIT" ]; then
   COMMON_ARGS+=(--lm-eval-limit "$LM_EVAL_LIMIT")
 fi
+if [ -n "$LM_EVAL_TASKS" ]; then
+  read -r -a LM_EVAL_TASK_ARRAY <<< "$LM_EVAL_TASKS"
+  COMMON_ARGS+=(--lm-eval-tasks "${LM_EVAL_TASK_ARRAY[@]}")
+fi
 if [ "$KEEP_MODEL" = "1" ]; then
   COMMON_ARGS+=(--keep-model)
 fi
@@ -373,6 +378,7 @@ LOG_FILE="$LOG_DIR/squeezellm_${TIMESTAMP}.log"
   echo "RBVT lambda: $RBVT_LAMBDA"
   echo "Worker threads: OMP=$OMP_NUM_THREADS | MKL=$MKL_NUM_THREADS"
   echo "RBVT calibration: C4/${N_CALIB}x${MAX_LENGTH}"
+  echo "LM-eval tasks override: ${LM_EVAL_TASKS:-default}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
   echo "Clean non-codebook statistics cache after completed results: $CLEAN_STATISTICS_CACHE"

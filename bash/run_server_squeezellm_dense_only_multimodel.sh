@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # SqueezeLLM dense-only multi-model benchmark:
-# bits 4/3, methods RTN/RBVT, cache cleaned after completed results.
+# bits 4/3, methods RTN/RBVT, full PPL + lm-eval task set.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -19,6 +19,8 @@ PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
 SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_dense_only_multimodel}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
+DENSE_DEVICE="${DENSE_DEVICE:-cuda:0}"
+LM_EVAL_TASKS="${LM_EVAL_TASKS:-arc_challenge arc_easy boolq hellaswag lambada_openai openbookqa piqa rte winogrande mmlu gsm8k}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -34,8 +36,10 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
 {
   echo "=== SqueezeLLM dense-only multi-model benchmark ==="
   echo "Model specs: $MODEL_SPECS"
+  echo "Device: $DENSE_DEVICE"
   echo "Bits: 4 3"
   echo "Methods: RTN/RBVT"
+  echo "LM-eval tasks: $LM_EVAL_TASKS"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   echo "Output: $SWEEP_OUTPUT_ROOT"
   echo "Cache cleanup: disabled; all SqueezeLLM caches are kept"
@@ -64,8 +68,10 @@ for spec in "${MODEL_ARRAY[@]}"; do
     echo
     echo "=== Model $label | $model ==="
     MODEL="$model" \
+    DEVICE="$DENSE_DEVICE" \
     BITS="4 3" \
     METHODS="rtn rbvt" \
+    LM_EVAL_TASKS="$LM_EVAL_TASKS" \
     OUTPUT_ROOT="$run_output" \
     STATISTICS_CACHE_DIR="$run_statistics" \
     LOG_DIR="$run_output/logs" \

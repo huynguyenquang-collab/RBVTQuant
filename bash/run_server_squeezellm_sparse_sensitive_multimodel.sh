@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # SqueezeLLM dense+sparse+sensitive multi-model benchmark:
-# bits 4/3, methods RTN/RBVT, cache cleaned after completed results.
+# bits 4/3, methods RTN/RBVT, full PPL + lm-eval task set.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -22,6 +22,8 @@ MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistral
 
 SQUEEZELLM_OUTLIER_RANGE="${SQUEEZELLM_OUTLIER_RANGE:-1.8}"
 SQUEEZELLM_SENSITIVE_PERCENT="${SQUEEZELLM_SENSITIVE_PERCENT:-0.05}"
+SPARSE_DEVICE="${SPARSE_DEVICE:-cuda:1}"
+LM_EVAL_TASKS="${LM_EVAL_TASKS:-arc_challenge arc_easy boolq hellaswag lambada_openai openbookqa piqa rte winogrande mmlu gsm8k}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -37,8 +39,10 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
 {
   echo "=== SqueezeLLM sparse+sensitive multi-model benchmark ==="
   echo "Model specs: $MODEL_SPECS"
+  echo "Device: $SPARSE_DEVICE"
   echo "Bits: 4 3"
   echo "Methods: RTN/RBVT"
+  echo "LM-eval tasks: $LM_EVAL_TASKS"
   echo "Outlier range: $SQUEEZELLM_OUTLIER_RANGE"
   echo "Sensitive percent: $SQUEEZELLM_SENSITIVE_PERCENT"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
@@ -69,8 +73,10 @@ for spec in "${MODEL_ARRAY[@]}"; do
     echo
     echo "=== Model $label | $model ==="
     MODEL="$model" \
+    DEVICE="$SPARSE_DEVICE" \
     BITS="4 3" \
     METHODS="rtn rbvt" \
+    LM_EVAL_TASKS="$LM_EVAL_TASKS" \
     SQUEEZELLM_MODE="hybrid" \
     SQUEEZELLM_OUTLIER_RANGE="$SQUEEZELLM_OUTLIER_RANGE" \
     SQUEEZELLM_SENSITIVE_PERCENT="$SQUEEZELLM_SENSITIVE_PERCENT" \

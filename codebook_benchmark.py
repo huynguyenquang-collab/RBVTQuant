@@ -415,34 +415,46 @@ def _format_value(value) -> str:
 
 def write_reports(output_root: Path, summaries: list[dict]) -> list[dict]:
     rows = [build_result_row(summary) for summary in summaries]
+    extra_columns = sorted(
+        {
+            column
+            for summary in summaries
+            for column in _flatten_lm_eval_metrics(summary)
+        }
+    )
+    for row, summary in zip(rows, summaries):
+        row.update(_flatten_lm_eval_metrics(summary))
     output_root.mkdir(parents=True, exist_ok=True)
+    result_columns = RESULT_COLUMNS + [
+        column for column in extra_columns if column not in RESULT_COLUMNS
+    ]
 
     json_path = output_root / "benchmark_results.json"
     json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
     csv_path = output_root / "benchmark_results.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RESULT_COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=result_columns)
         writer.writeheader()
         writer.writerows(rows)
 
     markdown_lines = [
-        "| " + " | ".join(RESULT_COLUMNS) + " |",
-        "|" + "|".join(["---"] * len(RESULT_COLUMNS)) + "|",
+        "| " + " | ".join(result_columns) + " |",
+        "|" + "|".join(["---"] * len(result_columns)) + "|",
     ]
     for row in rows:
         markdown_lines.append(
             "| "
-            + " | ".join(_format_value(row.get(column)) for column in RESULT_COLUMNS)
+            + " | ".join(_format_value(row.get(column)) for column in result_columns)
             + " |"
         )
     markdown_path = output_root / "benchmark_results.md"
     markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
 
     _print_section("CODEBOOK BENCHMARK RESULTS")
-    print("\t".join(RESULT_COLUMNS))
+    print("\t".join(result_columns))
     for row in rows:
-        print("\t".join(_format_value(row.get(column)) for column in RESULT_COLUMNS))
+        print("\t".join(_format_value(row.get(column)) for column in result_columns))
     print(f"\nReports: {json_path}, {csv_path}, {markdown_path}")
     return rows
 
