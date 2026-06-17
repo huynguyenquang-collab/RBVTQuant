@@ -1,37 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# LeanQuant multi-model benchmark with the best percdamp sweep setting:
-# exponent=4.0, percdamp=0.15, bits 4/3, methods RTN/RBVT.
+# SqueezeLLM dense-only multi-model benchmark:
+# bits 4/3, methods RTN/RBVT, cache cleaned after completed results.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
 PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
-SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/leanquant_percdamp015_multimodel}"
+SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_dense_only_multimodel}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
-
-LEANQUANT_EXPONENT="${LEANQUANT_EXPONENT:-4.0}"
-LEANQUANT_PERCDAMP="${LEANQUANT_PERCDAMP:-0.15}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
 
 mkdir -p "$SWEEP_OUTPUT_ROOT/runs" "$LOG_DIR"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-LOG_FILE="$LOG_DIR/leanquant_percdamp015_multimodel_${TIMESTAMP}.log"
+LOG_FILE="$LOG_DIR/squeezellm_dense_only_multimodel_${TIMESTAMP}.log"
 first_run=1
 
 IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
 
 {
-  echo "=== LeanQuant percdamp=0.15 multi-model benchmark ==="
+  echo "=== SqueezeLLM dense-only multi-model benchmark ==="
   echo "Model specs: $MODEL_SPECS"
   echo "Bits: 4 3"
   echo "Methods: RTN/RBVT"
-  echo "LeanQuant exponent: $LEANQUANT_EXPONENT"
-  echo "LeanQuant percdamp: $LEANQUANT_PERCDAMP"
   echo "Output: $SWEEP_OUTPUT_ROOT"
+  echo "Cache cleanup: enabled after completed metrics"
 } | tee -a "$LOG_FILE"
 
 for spec in "${MODEL_ARRAY[@]}"; do
@@ -59,8 +55,6 @@ for spec in "${MODEL_ARRAY[@]}"; do
     MODEL="$model" \
     BITS="4 3" \
     METHODS="rtn rbvt" \
-    LEANQUANT_EXPONENT="$LEANQUANT_EXPONENT" \
-    LEANQUANT_PERCDAMP="$LEANQUANT_PERCDAMP" \
     OUTPUT_ROOT="$run_output" \
     STATISTICS_CACHE_DIR="$run_statistics" \
     LOG_DIR="$run_output/logs" \
@@ -69,19 +63,17 @@ for spec in "${MODEL_ARRAY[@]}"; do
     RUN_SETUP="$setup_value" \
     RUN_TESTS="$tests_value" \
     RUN_PREFLIGHT="$preflight_value" \
-    bash bash/run_server_leanquant.sh
+    bash bash/run_server_squeezellm_dense_only.sh
   } 2>&1 | tee -a "$LOG_FILE"
 done
 
-"$PYTHON_BIN" - "$SWEEP_OUTPUT_ROOT" "$LEANQUANT_EXPONENT" "$LEANQUANT_PERCDAMP" <<'PY'
+"$PYTHON_BIN" - "$SWEEP_OUTPUT_ROOT" <<'PY'
 import csv
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-exponent = sys.argv[2]
-percdamp = sys.argv[3]
 rows = []
 for path in sorted((root / "runs").glob("*/benchmark_results.csv")):
     label = path.parent.name
@@ -96,19 +88,18 @@ for path in sorted((root / "runs").glob("*/benchmark_results.csv")):
             checkpoint = ""
     with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if row.get("codebook") == "LeanQuant":
+            if row.get("codebook") == "SqueezeLLM":
                 rows.append(
                     {
                         "model-key": label,
                         "checkpoint": checkpoint,
-                        "leanquant-exponent": exponent,
-                        "leanquant-percdamp": percdamp,
+                        "squeezellm-mode": "dense-only",
                         **row,
                     }
                 )
 
 if not rows:
-    raise SystemExit(f"No LeanQuant results found under {root / 'runs'}")
+    raise SystemExit(f"No SqueezeLLM results found under {root / 'runs'}")
 
 method_order = {"RTN": 0, "RBVT": 1}
 bit_order = {"4": 0, "3": 1}
@@ -122,18 +113,11 @@ rows.sort(
 fieldnames = [
     "model-key",
     "checkpoint",
-    "leanquant-exponent",
-    "leanquant-percdamp",
+    "squeezellm-mode",
 ] + [
     name
     for name in rows[0]
-    if name
-    not in {
-        "model-key",
-        "checkpoint",
-        "leanquant-exponent",
-        "leanquant-percdamp",
-    }
+    if name not in {"model-key", "checkpoint", "squeezellm-mode"}
 ]
 
 (root / "benchmark_results.json").write_text(
@@ -162,7 +146,7 @@ lines.extend(
     encoding="utf-8",
 )
 
-print("\nLeanQuant percdamp=0.15 multi-model results")
+print("\nSqueezeLLM dense-only multi-model results")
 print("\t".join(fieldnames))
 for row in rows:
     print("\t".join(row.get(column, "") for column in fieldnames))

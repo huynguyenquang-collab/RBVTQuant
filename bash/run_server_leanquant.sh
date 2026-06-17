@@ -48,6 +48,7 @@ LM_EVAL_BATCH_SIZE="${LM_EVAL_BATCH_SIZE:-auto}"
 LM_EVAL_NUM_FEWSHOT="${LM_EVAL_NUM_FEWSHOT:-}"
 LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 KEEP_MODEL="${KEEP_MODEL:-0}"
+CLEAN_STATISTICS_CACHE="${CLEAN_STATISTICS_CACHE:-0}"
 
 MIN_GPU_MEMORY_GIB="${MIN_GPU_MEMORY_GIB:-30}"
 ALLOW_LOW_VRAM="${ALLOW_LOW_VRAM:-0}"
@@ -140,6 +141,132 @@ mkdir -p \
 read -r -a BITS_ARRAY <<< "$BITS"
 read -r -a METHOD_ARRAY <<< "$METHODS"
 
+MODEL_SLUG="$(
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" - "$MODEL" <<'PY'
+import sys
+from runtime_utils import build_model_slug
+
+print(build_model_slug(sys.argv[1]))
+PY
+)"
+
+summary_has_full_metrics() {
+  local summary_path="$1"
+  local require_lm_eval="$2"
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" - "$summary_path" "$require_lm_eval" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+require_lm_eval = sys.argv[2] == "1"
+if not summary_path.exists():
+    raise SystemExit(1)
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+perplexity = summary.get("evaluation", {}).get("perplexity", {})
+for dataset in ("WikiText-2", "C4"):
+    value = perplexity.get(dataset, {}).get("perplexity")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise SystemExit(1)
+if not require_lm_eval:
+    raise SystemExit(0)
+tasks = {
+    "arc_challenge": ("acc_norm,none", "acc,none"),
+    "arc_easy": ("acc_norm,none", "acc,none"),
+    "boolq": ("acc,none",),
+    "hellaswag": ("acc_norm,none", "acc,none"),
+    "lambada_openai": ("acc,none",),
+    "openbookqa": ("acc_norm,none", "acc,none"),
+    "piqa": ("acc_norm,none", "acc,none"),
+    "rte": ("acc,none",),
+    "winogrande": ("acc,none",),
+}
+run_label = summary.get("run_label")
+task_summary = (
+    summary.get("evaluation", {})
+    .get("lm_eval", {})
+    .get(run_label, {})
+    .get("summary", {})
+)
+for task_name, metric_names in tasks.items():
+    metrics = task_summary.get(task_name, {})
+    if not any(
+        isinstance(metrics.get(metric), (int, float))
+        and not isinstance(metrics.get(metric), bool)
+        for metric in metric_names
+    ):
+        raise SystemExit(1)
+PY
+}
+
+leanquant_codebook_complete() {
+  local bits="$1"
+  local manifest="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream/manifest.json"
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" - "$manifest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+if not manifest.exists():
+    raise SystemExit(1)
+data = json.loads(manifest.read_text(encoding="utf-8"))
+raise SystemExit(0 if data.get("complete") else 1)
+PY
+}
+
+leanquant_bit_methods_complete() {
+  local bits="$1"
+  local method summary_path
+  for method in "${METHOD_ARRAY[@]}"; do
+    summary_path="$OUTPUT_ROOT/leanquant_${bits}bit_${method}/run_summary.json"
+    if ! summary_has_full_metrics "$summary_path" "$INCLUDE_LM_EVAL"; then
+      return 1
+    fi
+  done
+}
+
+leanquant_all_requested_complete() {
+  local bits
+  for bits in "${BITS_ARRAY[@]}"; do
+    if ! leanquant_bit_methods_complete "$bits"; then
+      return 1
+    fi
+  done
+}
+
+cleanup_completed_leanquant_statistics() {
+  [ "$CLEAN_STATISTICS_CACHE" = "1" ] || return 0
+
+  local bits codebook_dir hessian_dir
+  for bits in "${BITS_ARRAY[@]}"; do
+    codebook_dir="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
+    hessian_dir="$STATISTICS_CACHE_DIR/hessian/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
+
+    if leanquant_codebook_complete "$bits"; then
+      if [ -d "$hessian_dir" ]; then
+        echo "Removing completed LeanQuant Hessian cache: $hessian_dir"
+        rm -rf "$hessian_dir"
+      fi
+    fi
+
+    if leanquant_bit_methods_complete "$bits"; then
+      if [ -d "$codebook_dir" ]; then
+        echo "Removing completed LeanQuant codebook cache: $codebook_dir"
+        rm -rf "$codebook_dir"
+      fi
+    fi
+  done
+
+  if leanquant_all_requested_complete; then
+    if [ -d "$STATISTICS_CACHE_DIR/calibration" ]; then
+      echo "Removing completed calibration cache: $STATISTICS_CACHE_DIR/calibration"
+      rm -rf "$STATISTICS_CACHE_DIR/calibration"
+    fi
+    find "$STATISTICS_CACHE_DIR" -type d -empty -delete 2>/dev/null || true
+  fi
+}
+
 COMMON_ARGS=(
   --model-path "$MODEL"
   --device "$DEVICE"
@@ -198,8 +325,11 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "Calibration: C4/${N_CALIB}x${MAX_LENGTH}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
+  echo "Clean statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
   nvidia-smi
 } 2>&1 | tee -a "$LOG_FILE"
+
+cleanup_completed_leanquant_statistics
 
 run_index=0
 total_runs=$((${#BITS_ARRAY[@]} * ${#METHOD_ARRAY[@]}))
@@ -215,6 +345,7 @@ for bits in "${BITS_ARRAY[@]}"; do
         --bits "$bits" \
         --methods "$method"
     } 2>&1 | tee -a "$LOG_FILE"
+    cleanup_completed_leanquant_statistics
   done
 done
 

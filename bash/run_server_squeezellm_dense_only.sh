@@ -10,7 +10,7 @@ export SQUEEZELLM_MODE="dense-only"
 export BITS="${BITS:-4 3}"
 export METHODS="${METHODS:-rtn rbvt}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_dense_only_server}"
-export STATISTICS_CACHE_DIR="$OUTPUT_ROOT/_statistics"
+export STATISTICS_CACHE_DIR="${STATISTICS_CACHE_DIR:-$OUTPUT_ROOT/_statistics}"
 export LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/logs}"
 export LM_EVAL_OUTPUT_DIR="${LM_EVAL_OUTPUT_DIR:-$OUTPUT_ROOT/lm_eval}"
 
