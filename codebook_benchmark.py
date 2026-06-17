@@ -44,6 +44,7 @@ from quantizers.upstream_imports import (
     load_leanquant_upstream,
 )
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
+from runtime_utils import resolve_wandb_api_key
 
 
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B"
@@ -301,6 +302,84 @@ def build_result_row(summary: dict) -> dict:
         else None
     )
     return row
+
+
+def _wandb_metric_name(column: str) -> str:
+    if column == "ppl-wiki":
+        return "perplexity/WikiText-2"
+    if column == "ppl-c4":
+        return "perplexity/C4"
+    if column == "avg":
+        return "lm_eval/avg"
+    return f"lm_eval/{column}"
+
+
+def log_summary_to_wandb(args, summary: dict, run_id: str, elapsed: float):
+    try:
+        import wandb
+    except ImportError:
+        print("Warning: wandb is not installed; skipping W&B logging.")
+        return
+
+    api_key = resolve_wandb_api_key()
+    if api_key:
+        try:
+            wandb.login(key=api_key, relogin=True)
+        except Exception as exc:
+            print(f"Warning: wandb login failed; skipping W&B logging: {exc}")
+            return
+
+    row = build_result_row(summary)
+    metrics = {
+        _wandb_metric_name(column): value
+        for column, value in row.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    metrics["runtime/elapsed_seconds"] = elapsed
+
+    codebook = summary.get("codebook")
+    bits = summary.get("bits")
+    method = summary.get("method")
+    model_slug = build_model_slug(summary.get("model_path", args.model_path))
+    run_name = f"{codebook}_{model_slug}_{bits}bit_{method}"
+
+    try:
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            job_type="codebook_benchmark",
+            tags=[
+                "codebook-benchmark",
+                f"model:{model_slug}",
+                f"codebook:{codebook}",
+                f"bits:{bits}",
+                f"method:{method}",
+            ],
+            config={
+                **summary.get("args", {}),
+                "run_id": run_id,
+                "codebook": codebook,
+                "bits": bits,
+                "method": method,
+                "model_slug": model_slug,
+                "codebook_source": summary.get("codebook_source"),
+                "sensitivity_mode": summary.get("sensitivity_mode"),
+            },
+            reinit=True,
+        )
+        if run is None:
+            return
+        if metrics:
+            wandb.log(metrics)
+        for key, value in row.items():
+            wandb.summary[key] = value
+        wandb.summary["model_path"] = summary.get("model_path")
+        wandb.summary["output_dir"] = summary.get("output_dir")
+        wandb.summary["run_id"] = run_id
+        wandb.finish()
+    except Exception as exc:
+        print(f"Warning: W&B logging failed for {run_id}: {exc}")
 
 
 def _format_value(value) -> str:
@@ -676,9 +755,11 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         encoding="utf-8",
     )
     print(f"Saved run summary to {summary_path}")
+    elapsed = time.monotonic() - started_at
+    if args.use_wandb:
+        log_summary_to_wandb(args, summary, run_id, elapsed)
     if not args.keep_model:
         cleanup_output_dir(str(output_dir))
-    elapsed = time.monotonic() - started_at
     print(f"Done. run={run_id} | elapsed={elapsed:.1f}s")
     return summary
 
@@ -770,6 +851,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lm-eval-num-fewshot", type=int, default=None)
     parser.add_argument("--lm-eval-limit", type=float, default=None)
     parser.add_argument("--lm-eval-output-dir", default="./outputs/lm_eval_codebooks")
+    parser.add_argument("--use-wandb", dest="use_wandb", action="store_true", default=False)
+    parser.add_argument("--no-wandb", dest="use_wandb", action="store_false")
+    parser.add_argument("--wandb-project", default="rbvtquant")
+    parser.add_argument("--wandb-entity", default=None)
     return parser
 
 
@@ -833,6 +918,7 @@ def main():
         f"max_length={args.eval_max_length}, samples={args.eval_samples}, "
         f"lm_eval={args.include_lm_eval}"
     )
+    print(f"W&B logging: {args.use_wandb} | project={args.wandb_project}")
 
     benchmark_started_at = time.monotonic()
     summaries = []

@@ -12,6 +12,9 @@ PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
 SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_dense_only_multimodel}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
+USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 mkdir -p "$SWEEP_OUTPUT_ROOT/runs" "$LOG_DIR"
 
@@ -26,6 +29,7 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
   echo "Model specs: $MODEL_SPECS"
   echo "Bits: 4 3"
   echo "Methods: RTN/RBVT"
+  echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   echo "Output: $SWEEP_OUTPUT_ROOT"
   echo "Cache cleanup: enabled after completed metrics"
 } | tee -a "$LOG_FILE"
@@ -60,6 +64,9 @@ for spec in "${MODEL_ARRAY[@]}"; do
     LOG_DIR="$run_output/logs" \
     LM_EVAL_OUTPUT_DIR="$run_output/lm_eval" \
     CLEAN_STATISTICS_CACHE=1 \
+    USE_WANDB="$USE_WANDB" \
+    WANDB_PROJECT="$WANDB_PROJECT" \
+    WANDB_ENTITY="$WANDB_ENTITY" \
     RUN_SETUP="$setup_value" \
     RUN_TESTS="$tests_value" \
     RUN_PREFLIGHT="$preflight_value" \

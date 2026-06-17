@@ -49,6 +49,9 @@ LM_EVAL_NUM_FEWSHOT="${LM_EVAL_NUM_FEWSHOT:-}"
 LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 KEEP_MODEL="${KEEP_MODEL:-0}"
 CLEAN_STATISTICS_CACHE="${CLEAN_STATISTICS_CACHE:-0}"
+USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 MIN_GPU_MEMORY_GIB="${MIN_GPU_MEMORY_GIB:-30}"
 ALLOW_LOW_VRAM="${ALLOW_LOW_VRAM:-0}"
@@ -307,6 +310,14 @@ fi
 if [ "$KEEP_MODEL" = "1" ]; then
   COMMON_ARGS+=(--keep-model)
 fi
+if [ "$USE_WANDB" = "1" ]; then
+  COMMON_ARGS+=(--use-wandb --wandb-project "$WANDB_PROJECT")
+  if [ -n "$WANDB_ENTITY" ]; then
+    COMMON_ARGS+=(--wandb-entity "$WANDB_ENTITY")
+  fi
+else
+  COMMON_ARGS+=(--no-wandb)
+fi
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
@@ -326,6 +337,7 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
   echo "Clean statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
+  echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   nvidia-smi
 } 2>&1 | tee -a "$LOG_FILE"
 
