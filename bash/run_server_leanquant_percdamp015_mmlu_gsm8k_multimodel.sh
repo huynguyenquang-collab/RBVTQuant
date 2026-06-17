@@ -3,7 +3,8 @@ set -euo pipefail
 
 # LeanQuant percdamp=0.15 multi-model lm-eval extension:
 # run only MMLU and GSM8K for bits 4/3, methods RTN/RBVT.
-# Reuses the existing per-model LeanQuant codebook caches and keeps them.
+# Reuses existing per-model LeanQuant codebook caches when present, rebuilds
+# missing caches when needed, and keeps all codebook caches.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -55,7 +56,7 @@ clean_non_codebook_statistics() {
   find "$statistics_dir" -type d -empty -delete 2>/dev/null || true
 }
 
-validate_leanquant_codebooks() {
+report_leanquant_codebooks() {
   local statistics_dir="$1"
   local slug="$2"
   PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" - "$statistics_dir" "$slug" <<'PY'
@@ -81,10 +82,9 @@ for bits in (4, 3):
     if not data.get("complete"):
         missing.append(f"{manifest} (not complete)")
 if missing:
-    print("Missing/incomplete LeanQuant codebook cache:", file=sys.stderr)
+    print("Missing/incomplete LeanQuant codebook cache; missing entries will be rebuilt:")
     for item in missing:
-        print(f"  {item}", file=sys.stderr)
-    raise SystemExit(1)
+        print(f"  {item}")
 PY
 }
 
@@ -98,6 +98,7 @@ PY
   echo "Source codebook/cache root: $SOURCE_OUTPUT_ROOT"
   echo "Output: $SWEEP_OUTPUT_ROOT"
   echo "Codebook cache cleanup: disabled; codebooks are kept"
+  echo "Missing codebook cache policy: rebuild and keep"
   echo "Non-codebook statistics cleanup before each model: enabled"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
 } | tee -a "$LOG_FILE"
@@ -128,7 +129,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     echo "Statistics cache: $run_statistics"
     echo "Cleaning non-codebook statistics cache before lm-eval extension ..."
     clean_non_codebook_statistics "$run_statistics"
-    validate_leanquant_codebooks "$run_statistics" "$slug"
+    report_leanquant_codebooks "$run_statistics" "$slug"
 
     MODEL="$model" \
     BITS="4 3" \
