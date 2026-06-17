@@ -1,5 +1,4 @@
-# PyTorch is installed separately by setup_server_leanquant.sh so its CUDA
-# runtime can be matched to the NVIDIA driver on the server.
+torch
 transformers
 datasets
 tqdm

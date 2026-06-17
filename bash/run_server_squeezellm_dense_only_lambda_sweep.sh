@@ -38,7 +38,7 @@ for lambda_value in $LAMBDA_VALUES; do
   tests_value=0
   preflight_value=0
   if [ "$first_run" = "1" ]; then
-    setup_value="${RUN_SETUP:-1}"
+    setup_value="${RUN_SETUP:-0}"
     tests_value="${RUN_TESTS:-1}"
     preflight_value="${RUN_PREFLIGHT:-1}"
     first_run=0

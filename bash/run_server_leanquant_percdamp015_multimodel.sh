@@ -25,6 +25,7 @@ MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistral
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
+LM_EVAL_TASKS="${LM_EVAL_TASKS:-arc_challenge arc_easy boolq hellaswag lambada_openai openbookqa piqa rte winogrande mmlu gsm8k}"
 
 mkdir -p "$SWEEP_OUTPUT_ROOT/runs" "$LOG_DIR"
 
@@ -39,6 +40,7 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
   echo "Model specs: $MODEL_SPECS"
   echo "Bits: 4 3"
   echo "Methods: RTN/RBVT"
+  echo "LM-eval tasks: $LM_EVAL_TASKS"
   echo "LeanQuant exponent: $LEANQUANT_EXPONENT"
   echo "LeanQuant percdamp: $LEANQUANT_PERCDAMP"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
@@ -58,7 +60,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
   tests_value=0
   preflight_value=0
   if [ "$first_run" = "1" ]; then
-    setup_value="${RUN_SETUP:-1}"
+    setup_value="${RUN_SETUP:-0}"
     tests_value="${RUN_TESTS:-1}"
     preflight_value="${RUN_PREFLIGHT:-1}"
     first_run=0
@@ -76,6 +78,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     STATISTICS_CACHE_DIR="$run_statistics" \
     LOG_DIR="$run_output/logs" \
     LM_EVAL_OUTPUT_DIR="$run_output/lm_eval" \
+    LM_EVAL_TASKS="$LM_EVAL_TASKS" \
     CLEAN_STATISTICS_CACHE=1 \
     USE_WANDB="$USE_WANDB" \
     WANDB_PROJECT="$WANDB_PROJECT" \

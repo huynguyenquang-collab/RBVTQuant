@@ -26,7 +26,7 @@ if [ -z "${PYTHON_BIN:-}" ]; then
     PYTHON_BIN="$(command -v python || command -v python3 || true)"
   fi
 fi
-RUN_SETUP="${RUN_SETUP:-1}"
+RUN_SETUP="${RUN_SETUP:-0}"
 RUN_TESTS="${RUN_TESTS:-1}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
 
@@ -232,6 +232,11 @@ if not isinstance(requested_tasks, list):
     raise SystemExit(1)
 for task_name in requested_tasks:
     metrics = task_summary.get(task_name, {})
+    if task_name == "gsm8k":
+        for metric_name in ("exact_match,strict-match", "exact_match,flexible-extract"):
+            value = metrics.get(metric_name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise SystemExit(1)
     _, score = pick_lm_eval_metric(metrics)
     if score is None:
         raise SystemExit(1)

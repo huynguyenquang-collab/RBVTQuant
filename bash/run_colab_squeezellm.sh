@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-RUN_SETUP="${RUN_SETUP:-1}"
+RUN_SETUP="${RUN_SETUP:-0}"
 RUN_TESTS="${RUN_TESTS:-1}"
 SQUEEZE_CODEBOOKS="${SQUEEZE_CODEBOOKS:-squeezellm}"
 

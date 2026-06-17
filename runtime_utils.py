@@ -17,7 +17,7 @@ LM_EVAL_PREFERRED_METRICS = (
 )
 LM_EVAL_WANDB_CANONICAL_METRICS = {
     "mmlu": ("acc,none", "acc"),
-    "gsm8k": ("exact_match,strict-match",),
+    "gsm8k": ("exact_match,strict-match", "exact_match,flexible-extract"),
 }
 
 DEFAULT_LM_EVAL_TASKS = {

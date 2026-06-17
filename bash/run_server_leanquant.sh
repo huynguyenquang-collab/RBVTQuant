@@ -26,7 +26,7 @@ if [ -z "${PYTHON_BIN:-}" ]; then
     PYTHON_BIN="$(command -v python || command -v python3 || true)"
   fi
 fi
-RUN_SETUP="${RUN_SETUP:-1}"
+RUN_SETUP="${RUN_SETUP:-0}"
 RUN_TESTS="${RUN_TESTS:-1}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
 
@@ -207,6 +207,11 @@ if not isinstance(requested_tasks, list):
     raise SystemExit(1)
 for task_name in requested_tasks:
     metrics = task_summary.get(task_name, {})
+    if task_name == "gsm8k":
+        for metric_name in ("exact_match,strict-match", "exact_match,flexible-extract"):
+            value = metrics.get(metric_name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise SystemExit(1)
     _, score = pick_lm_eval_metric(metrics)
     if score is None:
         raise SystemExit(1)
@@ -252,22 +257,14 @@ leanquant_all_requested_complete() {
 cleanup_completed_leanquant_statistics() {
   [ "$CLEAN_STATISTICS_CACHE" = "1" ] || return 0
 
-  local bits codebook_dir hessian_dir
+  local bits hessian_dir
   for bits in "${BITS_ARRAY[@]}"; do
-    codebook_dir="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
     hessian_dir="$STATISTICS_CACHE_DIR/hessian/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
 
     if leanquant_codebook_complete "$bits"; then
       if [ -d "$hessian_dir" ]; then
         echo "Removing completed LeanQuant Hessian cache: $hessian_dir"
         rm -rf "$hessian_dir"
-      fi
-    fi
-
-    if leanquant_bit_methods_complete "$bits"; then
-      if [ -d "$codebook_dir" ]; then
-        echo "Removing completed LeanQuant codebook cache: $codebook_dir"
-        rm -rf "$codebook_dir"
       fi
     fi
   done
@@ -360,7 +357,7 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "Run suffix: ${RUN_SUFFIX:-none}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
-  echo "Clean statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
+  echo "Clean non-codebook statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   nvidia-smi
 } 2>&1 | tee -a "$LOG_FILE"
