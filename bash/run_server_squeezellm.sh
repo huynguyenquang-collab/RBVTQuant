@@ -275,16 +275,11 @@ squeezellm_all_requested_complete() {
 cleanup_completed_squeezellm_statistics() {
   [ "$CLEAN_STATISTICS_CACHE" = "1" ] || return 0
 
-  local bits codebook_dir sparse_dir fisher_dir
+  local bits sparse_dir fisher_dir
   for bits in "${BITS_ARRAY[@]}"; do
-    codebook_dir="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/squeezellm_${bits}bit_${SQUEEZELLM_CACHE_VERSION}"
     sparse_dir="$STATISTICS_CACHE_DIR/sparse_residuals/$MODEL_SLUG/squeezellm_${bits}bit_range${SQUEEZELLM_OUTLIER_RANGE}_sensitive${SQUEEZELLM_SENSITIVE_PERCENT}"
 
     if squeezellm_bit_methods_complete "$bits"; then
-      if [ -d "$codebook_dir" ]; then
-        echo "Removing completed SqueezeLLM codebook cache: $codebook_dir"
-        rm -rf "$codebook_dir"
-      fi
       if [ "$SQUEEZELLM_MODE" = "hybrid" ] && [ -d "$sparse_dir" ]; then
         echo "Removing completed SqueezeLLM sparse residual cache: $sparse_dir"
         rm -rf "$sparse_dir"
@@ -380,7 +375,7 @@ LOG_FILE="$LOG_DIR/squeezellm_${TIMESTAMP}.log"
   echo "RBVT calibration: C4/${N_CALIB}x${MAX_LENGTH}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
-  echo "Clean statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
+  echo "Clean non-codebook statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   nvidia-smi
 } 2>&1 | tee -a "$LOG_FILE"

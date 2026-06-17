@@ -38,7 +38,7 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
   echo "Methods: RTN/RBVT"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   echo "Output: $SWEEP_OUTPUT_ROOT"
-  echo "Cache cleanup: enabled after completed metrics"
+  echo "Cache cleanup: enabled after completed metrics; codebooks are kept"
 } | tee -a "$LOG_FILE"
 
 for spec in "${MODEL_ARRAY[@]}"; do
