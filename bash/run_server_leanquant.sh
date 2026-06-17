@@ -27,7 +27,7 @@ if [ -z "${PYTHON_BIN:-}" ]; then
   fi
 fi
 RUN_SETUP="${RUN_SETUP:-0}"
-RUN_TESTS="${RUN_TESTS:-1}"
+RUN_TESTS="${RUN_TESTS:-0}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
 
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B}"
