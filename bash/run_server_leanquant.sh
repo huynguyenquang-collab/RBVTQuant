@@ -69,6 +69,7 @@ CLEAN_STATISTICS_CACHE="${CLEAN_STATISTICS_CACHE:-0}"
 RUN_SUFFIX="${RUN_SUFFIX:-}"
 SKIP_PERPLEXITY="${SKIP_PERPLEXITY:-0}"
 LM_EVAL_TASKS="${LM_EVAL_TASKS:-}"
+FORCE_EVAL="${FORCE_EVAL:-1}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -337,6 +338,11 @@ else
   COMMON_ARGS+=(--no-wandb)
 fi
 
+JOB_ARGS=("${COMMON_ARGS[@]}")
+if [ "$FORCE_EVAL" = "1" ]; then
+  JOB_ARGS+=(--force-eval)
+fi
+
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
 
@@ -354,6 +360,7 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "Calibration: C4/${N_CALIB}x${MAX_LENGTH}"
   echo "Skip perplexity: $SKIP_PERPLEXITY"
   echo "LM-eval tasks override: ${LM_EVAL_TASKS:-default}"
+  echo "Force evaluation even when run_summary.json exists: $FORCE_EVAL"
   echo "Run suffix: ${RUN_SUFFIX:-none}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
@@ -373,7 +380,7 @@ for bits in "${BITS_ARRAY[@]}"; do
       echo
       echo "=== Job ${run_index}/${total_runs}: LeanQuant ${bits}-bit ${method} ==="
       "$PYTHON_BIN" codebook_benchmark.py \
-        "${COMMON_ARGS[@]}" \
+        "${JOB_ARGS[@]}" \
         --codebooks leanquant \
         --bits "$bits" \
         --methods "$method"

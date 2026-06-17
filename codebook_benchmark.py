@@ -488,7 +488,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         if codebook_name == "squeezellm"
         else "LeanQuant/lean_quantizer.py"
     )
-    if args.resume and summary_path.exists():
+    if args.resume and not args.force_eval and summary_path.exists():
         cached_summary = json.loads(summary_path.read_text(encoding="utf-8"))
         source_matches = (
             cached_summary.get("codebook_source") == expected_codebook_source
@@ -828,6 +828,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=["rtn", "rbvt"],
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--force-eval",
+        action="store_true",
+        help="Ignore existing run_summary.json and recompute quantization/evaluation; codebook/statistics caches are still reused.",
+    )
     parser.add_argument("--keep-model", action="store_true")
     parser.add_argument("--run-suffix", default="")
 
