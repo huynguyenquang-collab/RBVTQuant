@@ -55,7 +55,7 @@ SQUEEZELLM_HYBRID_SOURCE = (
 SQUEEZELLM_DENSE_ONLY_SOURCE = (
     f"{SQUEEZELLM_GRADIENTS_SOURCE}+SqueezeLLM-dense-only-v1"
 )
-LM_EVAL_TASKS = [
+DEFAULT_LM_EVAL_TASKS = [
     "arc_challenge",
     "arc_easy",
     "boolq",
@@ -315,6 +315,27 @@ def _wandb_metric_name(column: str) -> str:
     return f"lm_eval/{column}"
 
 
+def _flatten_lm_eval_metrics(summary: dict) -> dict[str, float]:
+    run_label = summary.get("run_label")
+    task_summary = (
+        summary.get("evaluation", {})
+        .get("lm_eval", {})
+        .get(run_label, {})
+        .get("summary", {})
+    )
+    if not isinstance(task_summary, dict):
+        return {}
+
+    metrics = {}
+    for task_name, task_metrics in task_summary.items():
+        if not isinstance(task_metrics, dict):
+            continue
+        for metric_name, value in task_metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                metrics[f"lm_eval/{task_name}/{metric_name}"] = float(value)
+    return metrics
+
+
 def log_summary_to_wandb(args, summary: dict, run_id: str, elapsed: float):
     try:
         import wandb
@@ -336,6 +357,7 @@ def log_summary_to_wandb(args, summary: dict, run_id: str, elapsed: float):
         for column, value in row.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
+    metrics.update(_flatten_lm_eval_metrics(summary))
     metrics["runtime/elapsed_seconds"] = elapsed
 
     codebook = summary.get("codebook")
@@ -429,6 +451,8 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     run_id = f"{codebook_name}_{bits}bit_{method}"
+    if args.run_suffix:
+        run_id = f"{run_id}_{args.run_suffix}"
     output_dir = Path(args.output_root) / run_id
     summary_path = output_dir / "run_summary.json"
     started_at = time.monotonic()
@@ -694,27 +718,31 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         torch.cuda.empty_cache()
 
     run_label = method.upper()
-    _print_section(f"PERPLEXITY EVALUATION | {run_id}")
-    perplexity = evaluate_quantized_model(
-        model_path=str(output_dir),
-        model_name=run_label,
-        eval_device=args.device,
-        eval_seed=args.seed,
-        eval_stride=args.eval_stride,
-        eval_max_length=args.eval_max_length,
-        eval_cache_dir=args.eval_cache_dir,
-        eval_samples=args.eval_samples,
-        hf_token=hf_token,
-    )
+    if args.skip_perplexity:
+        print("Perplexity evaluation disabled.")
+        perplexity = {}
+    else:
+        _print_section(f"PERPLEXITY EVALUATION | {run_id}")
+        perplexity = evaluate_quantized_model(
+            model_path=str(output_dir),
+            model_name=run_label,
+            eval_device=args.device,
+            eval_seed=args.seed,
+            eval_stride=args.eval_stride,
+            eval_max_length=args.eval_max_length,
+            eval_cache_dir=args.eval_cache_dir,
+            eval_samples=args.eval_samples,
+            hf_token=hf_token,
+        )
     if args.include_lm_eval:
         _print_section(f"LM-EVAL | {run_id}")
         print(
-            f"Tasks: {', '.join(LM_EVAL_TASKS)} | "
+            f"Tasks: {', '.join(args.lm_eval_tasks)} | "
             f"batch_size={args.lm_eval_batch_size} | "
             f"num_fewshot={args.lm_eval_num_fewshot} | limit={args.lm_eval_limit}"
         )
         lm_runner = LMEvalHarnessRunner(
-            tasks=LM_EVAL_TASKS,
+            tasks=args.lm_eval_tasks,
             device=args.device,
             batch_size=args.lm_eval_batch_size,
             num_fewshot=args.lm_eval_num_fewshot,
@@ -747,7 +775,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         "evaluation": {
             "perplexity": perplexity,
             "lm_eval": lm_eval,
-            "tasks": LM_EVAL_TASKS if args.include_lm_eval else [],
+            "tasks": args.lm_eval_tasks if args.include_lm_eval else [],
         },
         "args": vars(args),
     }
@@ -787,6 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--keep-model", action="store_true")
+    parser.add_argument("--run-suffix", default="")
 
     parser.add_argument("--skip-lmhead", action="store_true", default=True)
     parser.add_argument("--no-skip-lmhead", dest="skip_lmhead", action="store_false")
@@ -846,8 +875,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-max-length", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=2000)
     parser.add_argument("--eval-cache-dir", default="./dataset_cache")
+    parser.add_argument("--skip-perplexity", action="store_true")
     parser.add_argument("--include-lm-eval", action="store_true", default=True)
     parser.add_argument("--no-lm-eval", dest="include_lm_eval", action="store_false")
+    parser.add_argument("--lm-eval-tasks", nargs="+", default=list(DEFAULT_LM_EVAL_TASKS))
     parser.add_argument("--lm-eval-batch-size", default="auto")
     parser.add_argument("--lm-eval-num-fewshot", type=int, default=None)
     parser.add_argument("--lm-eval-limit", type=float, default=None)
@@ -922,7 +953,9 @@ def main():
     print(
         f"Evaluation: stride={args.eval_stride}, "
         f"max_length={args.eval_max_length}, samples={args.eval_samples}, "
-        f"lm_eval={args.include_lm_eval}"
+        f"perplexity={not args.skip_perplexity}, "
+        f"lm_eval={args.include_lm_eval}, "
+        f"lm_eval_tasks={args.lm_eval_tasks}"
     )
     print(f"W&B logging: {args.use_wandb} | project={args.wandb_project}")
 

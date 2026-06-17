@@ -56,6 +56,9 @@ LM_EVAL_NUM_FEWSHOT="${LM_EVAL_NUM_FEWSHOT:-}"
 LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 KEEP_MODEL="${KEEP_MODEL:-0}"
 CLEAN_STATISTICS_CACHE="${CLEAN_STATISTICS_CACHE:-0}"
+RUN_SUFFIX="${RUN_SUFFIX:-}"
+SKIP_PERPLEXITY="${SKIP_PERPLEXITY:-0}"
+LM_EVAL_TASKS="${LM_EVAL_TASKS:-}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -314,6 +317,16 @@ fi
 if [ -n "$LM_EVAL_LIMIT" ]; then
   COMMON_ARGS+=(--lm-eval-limit "$LM_EVAL_LIMIT")
 fi
+if [ -n "$LM_EVAL_TASKS" ]; then
+  read -r -a LM_EVAL_TASK_ARRAY <<< "$LM_EVAL_TASKS"
+  COMMON_ARGS+=(--lm-eval-tasks "${LM_EVAL_TASK_ARRAY[@]}")
+fi
+if [ "$SKIP_PERPLEXITY" = "1" ]; then
+  COMMON_ARGS+=(--skip-perplexity)
+fi
+if [ -n "$RUN_SUFFIX" ]; then
+  COMMON_ARGS+=(--run-suffix "$RUN_SUFFIX")
+fi
 if [ "$KEEP_MODEL" = "1" ]; then
   COMMON_ARGS+=(--keep-model)
 fi
@@ -341,6 +354,9 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "LeanQuant percdamp: $LEANQUANT_PERCDAMP"
   echo "LeanQuant worker threads: OMP=$OMP_NUM_THREADS | MKL=$MKL_NUM_THREADS"
   echo "Calibration: C4/${N_CALIB}x${MAX_LENGTH}"
+  echo "Skip perplexity: $SKIP_PERPLEXITY"
+  echo "LM-eval tasks override: ${LM_EVAL_TASKS:-default}"
+  echo "Run suffix: ${RUN_SUFFIX:-none}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
   echo "Clean statistics cache after completed results: $CLEAN_STATISTICS_CACHE"
