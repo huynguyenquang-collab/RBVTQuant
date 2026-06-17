@@ -153,8 +153,6 @@ bash bash/setup_server_leanquant.sh
 
 Runtime notes:
 
-- `datasets==3.6.0` is pinned because `lm-eval==0.4.4` still loads task
-  dataset scripts such as PIQA; `datasets` 4.x removed that capability.
 - Other Python packages are intentionally left unpinned unless a compatibility
   issue is known. Server PyTorch is installed separately by the setup script to
   match the CUDA runtime.
