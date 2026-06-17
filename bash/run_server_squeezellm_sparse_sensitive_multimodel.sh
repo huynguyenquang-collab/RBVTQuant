@@ -43,7 +43,7 @@ IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
   echo "Sensitive percent: $SQUEEZELLM_SENSITIVE_PERCENT"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   echo "Output: $SWEEP_OUTPUT_ROOT"
-  echo "Cache cleanup: enabled after completed metrics; codebooks are kept"
+  echo "Cache cleanup: disabled; all SqueezeLLM caches are kept"
 } | tee -a "$LOG_FILE"
 
 for spec in "${MODEL_ARRAY[@]}"; do
@@ -78,7 +78,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     STATISTICS_CACHE_DIR="$run_statistics" \
     LOG_DIR="$run_output/logs" \
     LM_EVAL_OUTPUT_DIR="$run_output/lm_eval" \
-    CLEAN_STATISTICS_CACHE=1 \
+    CLEAN_STATISTICS_CACHE=0 \
     USE_WANDB="$USE_WANDB" \
     WANDB_PROJECT="$WANDB_PROJECT" \
     WANDB_ENTITY="$WANDB_ENTITY" \
