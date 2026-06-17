@@ -32,7 +32,7 @@ SQUEEZELLM_SENSITIVE_PERCENT="${SQUEEZELLM_SENSITIVE_PERCENT:-0.05}"
 SPARSE_DEVICE="${SPARSE_DEVICE:-cuda:1}"
 LM_EVAL_TASKS="${LM_EVAL_TASKS:-arc_challenge arc_easy boolq hellaswag lambada_openai openbookqa piqa rte winogrande mmlu gsm8k}"
 USE_WANDB="${USE_WANDB:-1}"
-WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
+WANDB_PROJECT="${WANDB_PROJECT:-RBVTsqueeze}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 mkdir -p "$SWEEP_OUTPUT_ROOT/runs" "$LOG_DIR"
