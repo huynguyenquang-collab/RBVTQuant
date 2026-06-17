@@ -55,7 +55,7 @@ def kmeans_fit(row_data):
         n_init="auto",
         max_iter=50,
     ).fit(weights_np, sample_weight=sample_weight)
-    return kmeans.cluster_centers_.reshape(-1), np.cast["byte"](kmeans.labels_)
+    return kmeans.cluster_centers_.reshape(-1), np.asarray(kmeans.labels_, dtype=np.int8)
 
 
 if __name__ == "__main__":
@@ -203,4 +203,3 @@ if __name__ == "__main__":
     
     pool.close()
     pool.join()
-
