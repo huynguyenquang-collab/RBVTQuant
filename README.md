@@ -155,6 +155,9 @@ Runtime notes:
 
 - `datasets==3.6.0` is pinned because `lm-eval==0.4.4` still loads task
   dataset scripts such as PIQA; `datasets` 4.x removed that capability.
+- Other Python packages are intentionally left unpinned unless a compatibility
+  issue is known. Server PyTorch is installed separately by the setup script to
+  match the CUDA runtime.
 - `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
 - `lm-eval` uses the same task presets as the reference source. The default preset is `extended`:
   `arc_easy`, `arc_challenge`, `hellaswag`, `piqa`, `winogrande`, `boolq`, `rte`, `openbookqa`, `lambada_openai`.
@@ -163,4 +166,4 @@ Runtime notes:
 - For a fast harness sanity check, run:
   `bash bash/test_lm_eval.sh`
 - `wandb` logging is opt-in with `--use-wandb`.
-- Only perplexity and `lm-eval` `acc,none` are logged to `wandb`.
+- Perplexity and numeric `lm-eval` metrics are logged to `wandb`.
