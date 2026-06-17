@@ -327,15 +327,7 @@ def _flatten_lm_eval_metrics(summary: dict) -> dict[str, float]:
     if not isinstance(task_summary, dict):
         return {}
 
-    metrics = {}
-    for task_name, task_metrics in task_summary.items():
-        if not isinstance(task_metrics, dict):
-            continue
-        for metric_name, value in task_metrics.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                metrics[f"lm_eval/{task_name}/{metric_name}"] = float(value)
-    metrics.update(collect_lm_eval_wandb_metrics(task_summary))
-    return metrics
+    return collect_lm_eval_wandb_metrics(task_summary)
 
 
 def log_summary_to_wandb(args, summary: dict, run_id: str, elapsed: float):
@@ -354,11 +346,11 @@ def log_summary_to_wandb(args, summary: dict, run_id: str, elapsed: float):
             return
 
     row = build_result_row(summary)
-    metrics = {
-        _wandb_metric_name(column): value
-        for column, value in row.items()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    }
+    metrics = {}
+    for column in ("ppl-wiki", "ppl-c4"):
+        value = row.get(column)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics[_wandb_metric_name(column)] = value
     metrics.update(_flatten_lm_eval_metrics(summary))
     metrics["runtime/elapsed_seconds"] = elapsed
 

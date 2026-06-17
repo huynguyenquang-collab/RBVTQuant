@@ -282,28 +282,33 @@ squeezellm_all_requested_complete() {
 cleanup_completed_squeezellm_statistics() {
   [ "$CLEAN_STATISTICS_CACHE" = "1" ] || return 0
 
-  local bits sparse_dir fisher_dir
+  local bits sparse_dir fisher_dir codebook_dir
+  fisher_dir="$STATISTICS_CACHE_DIR/fisher/$MODEL_SLUG/c4_n${SQUEEZELLM_FISHER_SAMPLES}_len${SQUEEZELLM_FISHER_LENGTH}_seed0_gradients_5f2a166"
   for bits in "${BITS_ARRAY[@]}"; do
     sparse_dir="$STATISTICS_CACHE_DIR/sparse_residuals/$MODEL_SLUG/squeezellm_${bits}bit_range${SQUEEZELLM_OUTLIER_RANGE}_sensitive${SQUEEZELLM_SENSITIVE_PERCENT}"
+    codebook_dir="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/squeezellm_${bits}bit_${SQUEEZELLM_CACHE_VERSION}"
 
     if squeezellm_bit_methods_complete "$bits"; then
+      if [ -d "$codebook_dir" ]; then
+        echo "Removing completed SqueezeLLM codebook cache: $codebook_dir"
+        rm -rf "$codebook_dir"
+      fi
       if [ "$SQUEEZELLM_MODE" = "hybrid" ] && [ -d "$sparse_dir" ]; then
         echo "Removing completed SqueezeLLM sparse residual cache: $sparse_dir"
         rm -rf "$sparse_dir"
+      fi
+      if [ -z "$SQUEEZELLM_SENSITIVITY" ] && [ -d "$fisher_dir" ]; then
+        echo "Removing completed SqueezeLLM Fisher cache: $fisher_dir"
+        rm -rf "$fisher_dir"
+      fi
+      if [ -d "$STATISTICS_CACHE_DIR/calibration" ]; then
+        echo "Removing completed calibration cache: $STATISTICS_CACHE_DIR/calibration"
+        rm -rf "$STATISTICS_CACHE_DIR/calibration"
       fi
     fi
   done
 
   if squeezellm_all_requested_complete; then
-    fisher_dir="$STATISTICS_CACHE_DIR/fisher/$MODEL_SLUG/c4_n${SQUEEZELLM_FISHER_SAMPLES}_len${SQUEEZELLM_FISHER_LENGTH}_seed0_gradients_5f2a166"
-    if [ -z "$SQUEEZELLM_SENSITIVITY" ] && [ -d "$fisher_dir" ]; then
-      echo "Removing completed SqueezeLLM Fisher cache: $fisher_dir"
-      rm -rf "$fisher_dir"
-    fi
-    if [ -d "$STATISTICS_CACHE_DIR/calibration" ]; then
-      echo "Removing completed calibration cache: $STATISTICS_CACHE_DIR/calibration"
-      rm -rf "$STATISTICS_CACHE_DIR/calibration"
-    fi
     find "$STATISTICS_CACHE_DIR" -type d -empty -delete 2>/dev/null || true
   fi
 }

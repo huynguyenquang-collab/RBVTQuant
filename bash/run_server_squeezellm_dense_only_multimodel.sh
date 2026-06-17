@@ -83,7 +83,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     STATISTICS_CACHE_DIR="$run_statistics" \
     LOG_DIR="$run_output/logs" \
     LM_EVAL_OUTPUT_DIR="$run_output/lm_eval" \
-    CLEAN_STATISTICS_CACHE=0 \
+    CLEAN_STATISTICS_CACHE=1 \
     USE_WANDB="$USE_WANDB" \
     WANDB_PROJECT="$WANDB_PROJECT" \
     WANDB_ENTITY="$WANDB_ENTITY" \
