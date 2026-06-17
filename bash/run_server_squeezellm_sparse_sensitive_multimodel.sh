@@ -14,8 +14,15 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
-DEFAULT_PYTHON_BIN="$(command -v python3 || command -v python || true)"
-PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
+    PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
+    PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python || command -v python3 || true)"
+  fi
+fi
 SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_sparse_sensitive_multimodel}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
@@ -88,6 +95,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     USE_WANDB="$USE_WANDB" \
     WANDB_PROJECT="$WANDB_PROJECT" \
     WANDB_ENTITY="$WANDB_ENTITY" \
+    PYTHON_BIN="$PYTHON_BIN" \
     RUN_SETUP="$setup_value" \
     RUN_TESTS="$tests_value" \
     RUN_PREFLIGHT="$preflight_value" \

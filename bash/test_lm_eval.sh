@@ -4,8 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DEFAULT_PYTHON_BIN="$(command -v python3 || command -v python || true)"
-PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
+    PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
+    PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python || command -v python3 || true)"
+  fi
+fi
 LM_EVAL_TASKS="${LM_EVAL_TASKS:-arc_challenge arc_easy boolq hellaswag lambada_openai openbookqa piqa rte winogrande mmlu gsm8k}"
 
 read -r -a LM_EVAL_TASK_ARRAY <<< "$LM_EVAL_TASKS"

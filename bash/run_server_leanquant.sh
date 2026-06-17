@@ -15,7 +15,17 @@ if [ -f "$ROOT_DIR/.env" ]; then
 fi
 
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
-PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
+    PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
+    PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+  elif [ -x "$VENV_DIR/bin/python" ]; then
+    PYTHON_BIN="$VENV_DIR/bin/python"
+  else
+    PYTHON_BIN="$(command -v python || command -v python3 || true)"
+  fi
+fi
 RUN_SETUP="${RUN_SETUP:-1}"
 RUN_TESTS="${RUN_TESTS:-1}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
