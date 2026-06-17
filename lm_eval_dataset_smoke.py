@@ -17,17 +17,16 @@ def main():
 
     from datasets import Features
 
-    features = Features.from_dict(
-        {
-            "choices": {
-                "_type": "List",
-                "feature": {"_type": "Value", "dtype": "string"},
-            }
+    sequence_feature = {
+        "choices": {
+            "_type": "Sequence",
+            "feature": {"_type": "Value", "dtype": "string"},
         }
-    )
-    if features["choices"].__class__.__name__ != "Sequence":
-        raise RuntimeError(f"List compatibility failed: {features!r}")
-    print("datasets List-to-Sequence compatibility: OK")
+    }
+    features = Features.from_dict(sequence_feature)
+    if features["choices"].__class__.__name__ not in {"Sequence", "LargeList"}:
+        raise RuntimeError(f"Sequence compatibility failed: {features!r}")
+    print("datasets Sequence compatibility: OK")
 
     if args.download_piqa:
         from datasets import load_dataset
