@@ -36,6 +36,7 @@ from eval_perplexity import RBVTSlidingWindowEvaluator
 from lm_eval_runner import LMEvalHarnessRunner
 from quantizers import apply_rbvt, get_quantizer
 from runtime_utils import (
+    collect_lm_eval_wandb_metrics,
     DEFAULT_LM_EVAL_TASKS,
     build_model_slug,
     load_runtime_env,
@@ -102,17 +103,18 @@ def collect_wandb_metrics(perplexity_results: dict, lm_eval_payload: dict | None
 
     summary = lm_eval_payload.get("summary")
     raw_results = lm_eval_payload.get("raw", {}).get("results")
-    task_results = summary if isinstance(summary, dict) else raw_results if isinstance(raw_results, dict) else None
+    raw_groups = lm_eval_payload.get("raw", {}).get("groups")
+    task_results = {}
+    if isinstance(raw_results, dict):
+        task_results.update(raw_results)
+    if isinstance(raw_groups, dict):
+        task_results.update(raw_groups)
+    if isinstance(summary, dict):
+        task_results.update(summary)
     if not isinstance(task_results, dict):
         return flat
 
-    for task_name, metrics in task_results.items():
-        if not isinstance(metrics, dict):
-            continue
-        accuracy = metrics.get("acc,none")
-        if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
-            flat[f"lm_eval/{task_name}"] = accuracy
-
+    flat.update(collect_lm_eval_wandb_metrics(task_results))
     return flat
 
 

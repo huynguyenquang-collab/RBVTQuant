@@ -196,6 +196,8 @@ import json
 import sys
 from pathlib import Path
 
+from runtime_utils import pick_lm_eval_metric
+
 summary_path = Path(sys.argv[1])
 require_lm_eval = sys.argv[2] == "1"
 if not summary_path.exists():
@@ -208,17 +210,6 @@ for dataset in ("WikiText-2", "C4"):
         raise SystemExit(1)
 if not require_lm_eval:
     raise SystemExit(0)
-tasks = {
-    "arc_challenge": ("acc_norm,none", "acc,none"),
-    "arc_easy": ("acc_norm,none", "acc,none"),
-    "boolq": ("acc,none",),
-    "hellaswag": ("acc_norm,none", "acc,none"),
-    "lambada_openai": ("acc,none",),
-    "openbookqa": ("acc_norm,none", "acc,none"),
-    "piqa": ("acc_norm,none", "acc,none"),
-    "rte": ("acc,none",),
-    "winogrande": ("acc,none",),
-}
 run_label = summary.get("run_label")
 task_summary = (
     summary.get("evaluation", {})
@@ -226,13 +217,13 @@ task_summary = (
     .get(run_label, {})
     .get("summary", {})
 )
-for task_name, metric_names in tasks.items():
+requested_tasks = summary.get("args", {}).get("lm_eval_tasks", [])
+if not isinstance(requested_tasks, list):
+    raise SystemExit(1)
+for task_name in requested_tasks:
     metrics = task_summary.get(task_name, {})
-    if not any(
-        isinstance(metrics.get(metric), (int, float))
-        and not isinstance(metrics.get(metric), bool)
-        for metric in metric_names
-    ):
+    _, score = pick_lm_eval_metric(metrics)
+    if score is None:
         raise SystemExit(1)
 PY
 }

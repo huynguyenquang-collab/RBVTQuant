@@ -44,6 +44,7 @@ from quantizers.upstream_imports import (
     SQUEEZELLM_GRADIENTS_SOURCE,
     load_leanquant_upstream,
 )
+from runtime_utils import collect_lm_eval_wandb_metrics
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token
 from runtime_utils import resolve_wandb_api_key
 
@@ -333,6 +334,7 @@ def _flatten_lm_eval_metrics(summary: dict) -> dict[str, float]:
         for metric_name, value in task_metrics.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 metrics[f"lm_eval/{task_name}/{metric_name}"] = float(value)
+    metrics.update(collect_lm_eval_wandb_metrics(task_summary))
     return metrics
 
 

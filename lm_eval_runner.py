@@ -8,6 +8,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from runtime_utils import is_numeric_metric_value
+
 
 class LMEvalHarnessRunner:
     def __init__(
@@ -58,14 +60,18 @@ class LMEvalHarnessRunner:
         return repr(value)
 
     def _summarize_results(self, payload: dict) -> dict:
-        results = payload.get("results", {})
         summary = {}
-        for task_name, metrics in results.items():
-            task_summary = {}
-            for metric_name, value in metrics.items():
-                if isinstance(value, (int, float)):
-                    task_summary[metric_name] = value
-            summary[task_name] = task_summary
+        for section_name in ("results", "groups"):
+            section = payload.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+            for task_name, metrics in section.items():
+                if not isinstance(metrics, dict):
+                    continue
+                task_summary = summary.setdefault(task_name, {})
+                for metric_name, value in metrics.items():
+                    if is_numeric_metric_value(value):
+                        task_summary[metric_name] = value
         return summary
 
     def _write_raw_results(self, model_name: str, payload: dict):

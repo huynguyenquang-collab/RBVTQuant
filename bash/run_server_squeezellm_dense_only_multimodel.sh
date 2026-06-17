@@ -14,8 +14,8 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
-VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-server}"
-PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
+DEFAULT_PYTHON_BIN="$(command -v python3 || command -v python || true)"
+PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_dense_only_multimodel}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
@@ -58,7 +58,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
   tests_value=0
   preflight_value=0
   if [ "$first_run" = "1" ]; then
-    setup_value="${RUN_SETUP:-1}"
+    setup_value="${RUN_SETUP:-0}"
     tests_value="${RUN_TESTS:-1}"
     preflight_value="${RUN_PREFLIGHT:-1}"
     first_run=0
