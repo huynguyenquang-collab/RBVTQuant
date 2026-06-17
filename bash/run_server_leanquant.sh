@@ -41,6 +41,7 @@ LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/logs}"
 CACHE_ROOT="${CACHE_ROOT:-$ROOT_DIR/.cache}"
 HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
 HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+HF_MODULES_CACHE="${HF_MODULES_CACHE:-$HF_HOME/modules}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
 EVAL_CACHE_DIR="${EVAL_CACHE_DIR:-$CACHE_ROOT/evaluation}"
 LM_EVAL_OUTPUT_DIR="${LM_EVAL_OUTPUT_DIR:-$OUTPUT_ROOT/lm_eval}"
@@ -70,6 +71,7 @@ RUN_SUFFIX="${RUN_SUFFIX:-}"
 SKIP_PERPLEXITY="${SKIP_PERPLEXITY:-0}"
 LM_EVAL_TASKS="${LM_EVAL_TASKS:-}"
 FORCE_EVAL="${FORCE_EVAL:-1}"
+REFRESH_DATASETS_CACHE="${REFRESH_DATASETS_CACHE:-1}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -79,6 +81,7 @@ ALLOW_LOW_VRAM="${ALLOW_LOW_VRAM:-0}"
 
 export HF_HOME
 export HF_DATASETS_CACHE
+export HF_MODULES_CACHE
 export TRANSFORMERS_CACHE
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -158,6 +161,7 @@ mkdir -p \
   "$STATISTICS_CACHE_DIR" \
   "$LOG_DIR" \
   "$HF_DATASETS_CACHE" \
+  "$HF_MODULES_CACHE" \
   "$TRANSFORMERS_CACHE" \
   "$EVAL_CACHE_DIR" \
   "$LM_EVAL_OUTPUT_DIR"
@@ -361,6 +365,9 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "Skip perplexity: $SKIP_PERPLEXITY"
   echo "LM-eval tasks override: ${LM_EVAL_TASKS:-default}"
   echo "Force evaluation even when run_summary.json exists: $FORCE_EVAL"
+  echo "Refresh HuggingFace datasets cache before run: $REFRESH_DATASETS_CACHE"
+  echo "HF datasets cache: $HF_DATASETS_CACHE"
+  echo "HF modules cache: $HF_MODULES_CACHE"
   echo "Run suffix: ${RUN_SUFFIX:-none}"
   echo "Output: $OUTPUT_ROOT"
   echo "Statistics cache: $STATISTICS_CACHE_DIR"
@@ -368,6 +375,14 @@ LOG_FILE="$LOG_DIR/leanquant_${TIMESTAMP}.log"
   echo "W&B logging: $USE_WANDB | project=$WANDB_PROJECT | entity=${WANDB_ENTITY:-default}"
   nvidia-smi
 } 2>&1 | tee -a "$LOG_FILE"
+
+if [ "$REFRESH_DATASETS_CACHE" = "1" ]; then
+  {
+    echo "Refreshing HuggingFace datasets cache so lm-eval downloads fresh task metadata ..."
+    rm -rf "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE/datasets_modules"
+    mkdir -p "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE"
+  } 2>&1 | tee -a "$LOG_FILE"
+fi
 
 cleanup_completed_leanquant_statistics
 
