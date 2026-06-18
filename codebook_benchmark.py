@@ -1,4 +1,4 @@
-"""Benchmark LeanQuant and SqueezeLLM codebooks with RTN and RBVT."""
+"""Benchmark LeanQuant and SqueezeLLM codebooks with RTN, RBVT, and GPTQ."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from main import (
     evaluate_quantized_model,
     is_lmhead,
 )
+from nonuniform_gptq import quantize_codebook_model_gptq
 from quantizers import apply_rbvt
 from quantizers.base_codebook import CodebookContext
 from quantizers.codebook_store import CodebookStore
@@ -664,15 +665,9 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
     means: Dict[str, torch.Tensor] = {}
     variances: Dict[str, torch.Tensor] = {}
     calibration_texts = []
-    if method == "rbvt":
-        linears = [
-            (name, module)
-            for name, module in model.named_modules()
-            if isinstance(module, nn.Linear)
-            and (not args.skip_lmhead or not is_lmhead(name))
-        ]
+    if method in {"rbvt", "gptq"}:
         print(
-            f"Loading RBVT calibration data | dataset={args.calib_dataset} | "
+            f"Loading {method.upper()} calibration data | dataset={args.calib_dataset} | "
             f"samples={args.n_calib} | max_length={args.max_length} ..."
         )
         calibration_texts = load_calibration_data(
@@ -682,6 +677,13 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
             seqlen=args.max_length,
             seed=args.seed,
         )
+    if method == "rbvt":
+        linears = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+            and (not args.skip_lmhead or not is_lmhead(name))
+        ]
         means, variances = collect_layer_stats(
             model=model,
             tokenizer=tokenizer,
@@ -698,21 +700,39 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
         )
 
     _print_section(f"QUANTIZATION | {run_id}")
-    quantization = quantize_with_codebook(
-        model=model,
-        codebook=codebook,
-        method=method,
-        means=means,
-        variances=variances,
-        skip_lmhead=args.skip_lmhead,
-        row_chunk=args.row_chunk,
-        rbvt_lambda=args.rbvt_lambda,
-        rbvt_topk=args.rbvt_topk,
-        gap_floor=args.gap_floor,
-        strict_descent=args.strict_descent,
-        codebook_store=codebook_store,
-        sparse_store=sparse_store,
-    )
+    if method == "gptq":
+        quantization = quantize_codebook_model_gptq(
+            model=model,
+            tokenizer=tokenizer,
+            codebook=codebook,
+            codebook_store=codebook_store,
+            calib_texts=calibration_texts,
+            device=args.device,
+            skip_lmhead=args.skip_lmhead,
+            n_calib=args.n_calib,
+            max_length=args.max_length,
+            row_chunk=args.row_chunk,
+            gptq_blocksize=args.gptq_blocksize,
+            gptq_percdamp=args.gptq_percdamp,
+            gptq_act_order=args.gptq_act_order,
+            sparse_store=sparse_store,
+        )
+    else:
+        quantization = quantize_with_codebook(
+            model=model,
+            codebook=codebook,
+            method=method,
+            means=means,
+            variances=variances,
+            skip_lmhead=args.skip_lmhead,
+            row_chunk=args.row_chunk,
+            rbvt_lambda=args.rbvt_lambda,
+            rbvt_topk=args.rbvt_topk,
+            gap_floor=args.gap_floor,
+            strict_descent=args.strict_descent,
+            codebook_store=codebook_store,
+            sparse_store=sparse_store,
+        )
 
     print(f"Saving to {output_dir} ...")
     model.save_pretrained(output_dir)
@@ -801,7 +821,7 @@ def run_one(args, codebook_name: str, bits: int, method: str) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="LeanQuant/SqueezeLLM codebook benchmark for RTN and RBVT"
+        description="LeanQuant/SqueezeLLM codebook benchmark for RTN, RBVT, and GPTQ"
     )
     parser.add_argument("--model-path", default=DEFAULT_MODEL)
     parser.add_argument("--device", default="cuda:0")
@@ -816,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["rtn", "rbvt"],
+        choices=["rtn", "rbvt", "gptq"],
         default=["rtn", "rbvt"],
     )
     parser.add_argument("--resume", action="store_true")
@@ -841,6 +861,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1024,
         help="General quantization/RBVT row chunk; matches main.py by default",
+    )
+    parser.add_argument("--gptq-blocksize", type=int, default=128)
+    parser.add_argument("--gptq-percdamp", type=float, default=0.01)
+    parser.add_argument(
+        "--gptq-act-order",
+        dest="gptq_act_order",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--no-gptq-act-order",
+        dest="gptq_act_order",
+        action="store_false",
     )
     parser.add_argument("--leanquant-exponent", type=float, default=4.0)
     parser.add_argument("--leanquant-percdamp", type=float, default=0.1)
