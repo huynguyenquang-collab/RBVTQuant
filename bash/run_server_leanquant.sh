@@ -111,8 +111,8 @@ if [ -z "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-${HUGGINGFACE_TOKEN:-}}}" ]; then
 fi
 
 if [ "$RUN_TESTS" = "1" ]; then
-  PYTHON_BIN="$PYTHON_BIN" VENV_DIR="$VENV_DIR" LM_EVAL_TASKS="$LM_EVAL_TASKS" \
-    bash bash/test_colab_codebooks.sh
+  PYTHON_BIN="$PYTHON_BIN" LM_EVAL_TASKS="$LM_EVAL_TASKS" \
+    bash bash/test_lm_eval.sh
 fi
 
 if [ "$RUN_PREFLIGHT" = "1" ]; then
