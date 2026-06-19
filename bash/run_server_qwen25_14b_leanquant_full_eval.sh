@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Disk-conscious Qwen2.5-14B LeanQuant full evaluation runner.
 # Runs 4/3-bit x RTN/RBVT, with WikiText-2/C4 perplexity and lm-eval tasks
-# including MMLU and GSM8K. It reuses precomputed LeanQuant codebooks and
-# removes temporary model artifacts/caches aggressively between jobs.
+# including MMLU and GSM8K. It reuses precomputed LeanQuant codebooks when
+# available, builds missing codebooks, then removes temporary artifacts/caches.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -71,7 +71,8 @@ LM_EVAL_LIMIT="${LM_EVAL_LIMIT:-}"
 RUN_SETUP="${RUN_SETUP:-0}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-0}"
 FORCE_EVAL="${FORCE_EVAL:-1}"
-REQUIRE_CODEBOOKS="${REQUIRE_CODEBOOKS:-1}"
+BUILD_MISSING_CODEBOOKS="${BUILD_MISSING_CODEBOOKS:-1}"
+REBUILD_INVALID_CODEBOOKS="${REBUILD_INVALID_CODEBOOKS:-1}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -162,6 +163,56 @@ cleanup_weight_outputs() {
   \) -not -path "$STATISTICS_CACHE_DIR/codebooks/*" -delete 2>/dev/null || true
 }
 
+codebook_manifest() {
+  local bits="$1"
+  echo "$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream/manifest.json"
+}
+
+validate_codebook_manifest() {
+  local manifest="$1"
+  local bits="$2"
+  "$PYTHON_BIN" - "$manifest" "$bits" "$LEANQUANT_PERCDAMP" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+bits = sys.argv[2]
+expected_percdamp = float(sys.argv[3])
+if not manifest.exists():
+    raise SystemExit(f"Missing {bits}-bit manifest: {manifest}")
+data = json.loads(manifest.read_text(encoding="utf-8"))
+if not data.get("complete"):
+    raise SystemExit(f"Incomplete {bits}-bit codebook manifest: {manifest}")
+actual_percdamp = data.get("metadata", {}).get("percdamp", data.get("percdamp"))
+if actual_percdamp is not None and abs(float(actual_percdamp) - expected_percdamp) > 1e-12:
+    raise SystemExit(
+        f"{bits}-bit codebook percdamp mismatch: manifest={actual_percdamp}, "
+        f"runner={expected_percdamp}"
+    )
+print(f"Codebook OK: {bits}-bit -> {manifest.parent}")
+PY
+}
+
+codebook_complete() {
+  local bits="$1"
+  local manifest
+  manifest="$(codebook_manifest "$bits")"
+  [ -f "$manifest" ] || return 1
+  validate_codebook_manifest "$manifest" "$bits" >/dev/null
+}
+
+cleanup_auxiliary_statistics() {
+  local bits="$1"
+  local hessian_dir="$STATISTICS_CACHE_DIR/hessian/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
+
+  if codebook_complete "$bits"; then
+    rm -rf "$hessian_dir" 2>/dev/null || true
+  fi
+  rm -rf "$STATISTICS_CACHE_DIR/calibration" 2>/dev/null || true
+  find "$STATISTICS_CACHE_DIR" -type d -empty -delete 2>/dev/null || true
+}
+
 copy_codebook_if_needed() {
   local bits="$1"
   local name="leanquant_${bits}bit_direct_upstream"
@@ -186,9 +237,6 @@ copy_codebook_if_needed() {
   done
 
   if [ -z "$src" ]; then
-    echo "Missing precomputed LeanQuant ${bits}-bit codebook." >&2
-    echo "Set CODEBOOK_IMPORT_ROOT or place it under:" >&2
-    echo "  $STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/$name" >&2
     return 1
   fi
 
@@ -196,32 +244,39 @@ copy_codebook_if_needed() {
   rsync -a --ignore-existing "$src/" "$dst/"
 }
 
-verify_codebooks() {
-  [ "$REQUIRE_CODEBOOKS" = "1" ] || return 0
+prepare_codebooks() {
   for bits in "${BITS_ARRAY[@]}"; do
-    copy_codebook_if_needed "$bits"
-    local manifest="$STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream/manifest.json"
-    "$PYTHON_BIN" - "$manifest" "$bits" "$LEANQUANT_PERCDAMP" <<'PY'
-import json
-import sys
-from pathlib import Path
+    local manifest
+    manifest="$(codebook_manifest "$bits")"
+    if [ ! -f "$manifest" ]; then
+      copy_codebook_if_needed "$bits" || true
+    fi
 
-manifest = Path(sys.argv[1])
-bits = sys.argv[2]
-expected_percdamp = float(sys.argv[3])
-if not manifest.exists():
-    raise SystemExit(f"Missing {bits}-bit manifest: {manifest}")
-data = json.loads(manifest.read_text(encoding="utf-8"))
-if not data.get("complete"):
-    raise SystemExit(f"Incomplete {bits}-bit codebook manifest: {manifest}")
-actual_percdamp = data.get("metadata", {}).get("percdamp", data.get("percdamp"))
-if actual_percdamp is not None and abs(float(actual_percdamp) - expected_percdamp) > 1e-12:
-    raise SystemExit(
-        f"{bits}-bit codebook percdamp mismatch: manifest={actual_percdamp}, "
-        f"runner={expected_percdamp}"
-    )
-print(f"Codebook OK: {bits}-bit -> {manifest.parent}")
-PY
+    if [ -f "$manifest" ]; then
+      if validate_codebook_manifest "$manifest" "$bits"; then
+        cleanup_auxiliary_statistics "$bits"
+        continue
+      fi
+
+      if [ "$BUILD_MISSING_CODEBOOKS" = "1" ] && [ "$REBUILD_INVALID_CODEBOOKS" = "1" ]; then
+        echo "Invalid/incomplete ${bits}-bit codebook; removing it so the next job rebuilds cleanly."
+        rm -rf "$(dirname "$manifest")"
+        rm -rf "$STATISTICS_CACHE_DIR/hessian/$MODEL_SLUG/leanquant_${bits}bit_direct_upstream"
+        rm -rf "$STATISTICS_CACHE_DIR/calibration"
+        continue
+      fi
+
+      exit 1
+    fi
+
+    if [ "$BUILD_MISSING_CODEBOOKS" = "1" ]; then
+      echo "Codebook missing for ${bits}-bit; it will be built during the first ${bits}-bit job."
+      continue
+    fi
+
+    echo "Error: missing ${bits}-bit codebook and BUILD_MISSING_CODEBOOKS=0." >&2
+    echo "Expected: $manifest" >&2
+    exit 1
   done
 }
 
@@ -335,6 +390,7 @@ run_one() {
   set -e
 
   cleanup_weight_outputs
+  cleanup_auxiliary_statistics "$bits"
   if [ "$CLEAN_PPL_CACHE_BETWEEN_RUNS" = "1" ]; then
     cleanup_ppl_cache
   fi
@@ -410,6 +466,8 @@ LOG_FILE="$LOG_DIR/qwen25_14b_full_eval_${TIMESTAMP}.log"
   echo "lm-eval tasks: $LM_EVAL_TASKS"
   echo "Output: $OUTPUT_ROOT"
   echo "Codebooks: $STATISTICS_CACHE_DIR/codebooks/$MODEL_SLUG"
+  echo "Build missing codebooks: $BUILD_MISSING_CODEBOOKS"
+  echo "Rebuild invalid codebooks: $REBUILD_INVALID_CODEBOOKS"
   echo "Runtime cache: $CACHE_ROOT"
   echo "Log: $LOG_FILE"
   nvidia-smi || true
@@ -417,7 +475,7 @@ LOG_FILE="$LOG_DIR/qwen25_14b_full_eval_${TIMESTAMP}.log"
 
 cleanup_ppl_cache 2>&1 | tee -a "$LOG_FILE"
 cleanup_weight_outputs 2>&1 | tee -a "$LOG_FILE"
-verify_codebooks 2>&1 | tee -a "$LOG_FILE"
+prepare_codebooks 2>&1 | tee -a "$LOG_FILE"
 
 run_index=0
 total_runs=$((${#BITS_ARRAY[@]} * ${#METHOD_ARRAY[@]}))
@@ -437,6 +495,9 @@ done
   echo "=== Building combined report ==="
   build_report
   cleanup_weight_outputs
+  for bits in "${BITS_ARRAY[@]}"; do
+    cleanup_auxiliary_statistics "$bits"
+  done
   print_space
 } 2>&1 | tee -a "$LOG_FILE"
 
