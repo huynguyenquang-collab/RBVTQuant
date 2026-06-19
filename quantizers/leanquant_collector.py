@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import torch
@@ -92,17 +93,19 @@ def collect_leanquant_codebooks(
                 f"LeanQuant cache metadata mismatch: {store.metadata} != {metadata}"
             )
         print(f"Reusing LeanQuant codebook cache: {store.root}")
-    if hessian_store.complete:
+        return
+    cache_hessian = os.getenv("RBVT_LEANQUANT_CACHE_HESSIAN", "0") == "1"
+    if not cache_hessian:
+        print("LeanQuant Hessian disk cache disabled; Hessians stay in memory only.")
+    if cache_hessian and hessian_store.complete:
         if hessian_store.metadata != metadata:
             raise ValueError(
                 f"LeanQuant Hessian cache metadata mismatch: {hessian_store.metadata} != {metadata}"
             )
         print(f"Reusing LeanQuant Hessian cache: {hessian_store.root}")
-    if store.complete and hessian_store.complete:
-        return
     if not store.complete:
         store.initialize(metadata)
-    if not hessian_store.complete:
+    if cache_hessian and not hessian_store.complete:
         hessian_store.initialize(metadata)
 
     layers = model.model.layers
@@ -157,7 +160,7 @@ def collect_leanquant_codebooks(
                 cache_key = f"model.layers.{layer_index}.{name}"
                 leanquant = LeanQuant(module)
                 workers[name] = (module, cache_key, leanquant)
-                hessian = hessian_store.get(cache_key)
+                hessian = hessian_store.get(cache_key) if cache_hessian else None
                 if hessian is None:
                     handles.append(
                         module.register_forward_hook(
@@ -182,9 +185,10 @@ def collect_leanquant_codebooks(
                 finally:
                     for handle in handles:
                         handle.remove()
-                for _name, (_module, cache_key, leanquant) in workers.items():
-                    if not hessian_store.has(cache_key):
-                        hessian_store.put(cache_key, leanquant.H)
+                if cache_hessian:
+                    for _name, (_module, cache_key, leanquant) in workers.items():
+                        if not hessian_store.has(cache_key):
+                            hessian_store.put(cache_key, leanquant.H)
 
             for name in names:
                 module, cache_key, leanquant = workers[name]
@@ -225,7 +229,8 @@ def collect_leanquant_codebooks(
             torch.cuda.empty_cache()
 
     store.mark_complete()
-    hessian_store.mark_complete()
+    if cache_hessian:
+        hessian_store.mark_complete()
     if original_use_cache is not None:
         model.config.use_cache = original_use_cache
 
