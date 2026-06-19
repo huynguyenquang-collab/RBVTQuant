@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # SqueezeLLM dense+sparse+sensitive multi-model benchmark:
-# bits 4/3, methods RTN/RBVT, full PPL + lm-eval task set.
+# bits 4/3, method GPTQ, full PPL + lm-eval task set.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -23,7 +23,7 @@ if [ -z "${PYTHON_BIN:-}" ]; then
     PYTHON_BIN="$(command -v python || command -v python3 || true)"
   fi
 fi
-SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_sparse_sensitive_multimodel}"
+SWEEP_OUTPUT_ROOT="${SWEEP_OUTPUT_ROOT:-$ROOT_DIR/outputs/squeezellm_sparse_sensitive_multimodel_gptq}"
 LOG_DIR="${LOG_DIR:-$SWEEP_OUTPUT_ROOT/logs}"
 MODEL_SPECS="${MODEL_SPECS:-Llama31=meta-llama/Llama-3.1-8B;Mistral7Bv03=mistralai/Mistral-7B-v0.3;Qwen25_7B=Qwen/Qwen2.5-7B}"
 
@@ -38,17 +38,17 @@ WANDB_ENTITY="${WANDB_ENTITY:-}"
 mkdir -p "$SWEEP_OUTPUT_ROOT/runs" "$LOG_DIR"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-LOG_FILE="$LOG_DIR/squeezellm_sparse_sensitive_multimodel_${TIMESTAMP}.log"
+LOG_FILE="$LOG_DIR/squeezellm_sparse_sensitive_multimodel_gptq_${TIMESTAMP}.log"
 first_run=1
 
 IFS=';' read -r -a MODEL_ARRAY <<< "$MODEL_SPECS"
 
 {
-  echo "=== SqueezeLLM sparse+sensitive multi-model benchmark ==="
+  echo "=== SqueezeLLM sparse+sensitive multi-model GPTQ benchmark ==="
   echo "Model specs: $MODEL_SPECS"
   echo "Device: $SPARSE_DEVICE"
   echo "Bits: 4 3"
-  echo "Methods: RTN/RBVT"
+  echo "Methods: GPTQ"
   echo "LM-eval tasks: $LM_EVAL_TASKS"
   echo "Outlier range: $SQUEEZELLM_OUTLIER_RANGE"
   echo "Sensitive percent: $SQUEEZELLM_SENSITIVE_PERCENT"
@@ -82,7 +82,7 @@ for spec in "${MODEL_ARRAY[@]}"; do
     MODEL="$model" \
     DEVICE="$SPARSE_DEVICE" \
     BITS="4 3" \
-    METHODS="rtn rbvt" \
+    METHODS="gptq" \
     LM_EVAL_TASKS="$LM_EVAL_TASKS" \
     SQUEEZELLM_MODE="hybrid" \
     SQUEEZELLM_OUTLIER_RANGE="$SQUEEZELLM_OUTLIER_RANGE" \
@@ -141,7 +141,7 @@ for path in sorted((root / "runs").glob("*/benchmark_results.csv")):
 if not rows:
     raise SystemExit(f"No SqueezeLLM results found under {root / 'runs'}")
 
-method_order = {"RTN": 0, "RBVT": 1}
+method_order = {"GPTQ": 0}
 bit_order = {"4": 0, "3": 1}
 rows.sort(
     key=lambda row: (
@@ -195,7 +195,7 @@ lines.extend(
     encoding="utf-8",
 )
 
-print("\nSqueezeLLM sparse+sensitive multi-model results")
+print("\nSqueezeLLM sparse+sensitive multi-model GPTQ results")
 print("\t".join(fieldnames))
 for row in rows:
     print("\t".join(row.get(column, "") for column in fieldnames))
