@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib.util
 import json
-import math
 import random
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+import types
 from pathlib import Path
 from typing import Dict, Iterable
 
@@ -26,6 +26,7 @@ import torch.nn as nn
 
 ROOT = Path(__file__).resolve().parent
 GPTVQ_ROOT = ROOT / "GPTVQ"
+NCC_ROOT = ROOT / "NCCQuant"
 if not GPTVQ_ROOT.exists():
     raise RuntimeError(
         "Missing ./GPTVQ. Clone upstream first: "
@@ -54,12 +55,7 @@ from quantizers.base_quantizer import QuantResult  # noqa: E402
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token  # noqa: E402
 
 
-@dataclass
-class NCCStats:
-    flips: int
-    bias_before: float
-    bias_after: float
-    channels: int
+_NCC_APPLY = None
 
 
 def _hf_device(device: str) -> torch.device:
@@ -281,104 +277,115 @@ def _activation_error_metrics(
     return metrics
 
 
+def _load_ncc_apply():
+    global _NCC_APPLY
+    if _NCC_APPLY is not None:
+        return _NCC_APPLY
+    ncc_file = NCC_ROOT / "quantizers" / "ncc.py"
+    if not ncc_file.exists():
+        raise RuntimeError(
+            "Missing ./NCCQuant. Clone upstream first: "
+            "git clone https://github.com/anhnda/NCCQuant.git NCCQuant"
+        )
+    package_name = "_rbvt_external_nccquant_quantizers"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(NCC_ROOT / "quantizers")]
+        sys.modules[package_name] = package
+    spec = importlib.util.spec_from_file_location(f"{package_name}.ncc", ncc_file)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load NCCQuant module from {ncc_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{package_name}.ncc"] = module
+    spec.loader.exec_module(module)
+    _NCC_APPLY = module.apply_ncc
+    return _NCC_APPLY
+
+
 @torch.no_grad()
-def apply_ncc_correction(
+def _refresh_quant_indices_from_dequant(qres: QuantResult, W_dequant: torch.Tensor) -> QuantResult:
+    if qres.block_codebooks is None:
+        raise RuntimeError("GPTVQ-1D NCC sweeps require materialized block_codebooks.")
+    device = W_dequant.device
+    out_features, in_features = W_dequant.shape
+    bs = qres.block_size
+    n_blocks = qres.block_codebooks.shape[1]
+    indices = torch.empty(out_features, in_features, dtype=torch.long, device=device)
+    levels = qres.block_codebooks.to(device).float()
+    W = W_dequant.float()
+    for block_idx in range(n_blocks):
+        c0 = block_idx * bs
+        c1 = min(c0 + bs, in_features)
+        if c0 >= c1:
+            continue
+        grid = levels[:, block_idx, :]
+        diff = (W[:, c0:c1].unsqueeze(-1) - grid.unsqueeze(1)).abs()
+        indices[:, c0:c1] = diff.argmin(dim=-1)
+        del diff
+    return QuantResult(
+        W_dequant=W_dequant,
+        indices=indices,
+        q_levels=qres.q_levels,
+        block_scales=qres.block_scales,
+        block_size=qres.block_size,
+        block_codebooks=qres.block_codebooks,
+    )
+
+
+@torch.no_grad()
+def _apply_ncc_sweeps(
+    *,
     W_fp: torch.Tensor,
     qres: QuantResult,
     mu: torch.Tensor,
-    budget_p: float = 0.02,
-    row_chunk: int = 1024,
-) -> tuple[torch.Tensor, NCCStats]:
-    """NCCQuant first-moment correction adapted to GPTVQ-1D scalar codebooks.
-
-    This follows NCCQuant/quantizers/ncc.py: compute b_j = mu dot (Wq-W),
-    consider sign-aligned neighbour flips in each scalar codebook, sort by
-    eta=|mu|/gap, then greedily choose the best prefix under budget.
-    """
-    device = W_fp.device
-    out_features, in_features = W_fp.shape
-    bs = qres.block_size
-    mu = mu.to(device).float()
-    Wq_full = qres.W_dequant.to(device).float()
-    indices_full = qres.indices.to(device)
-    Wq_corr = Wq_full.clone()
-    col_block = torch.arange(in_features, device=device) // bs
-
+    mu_var: torch.Tensor | None,
+    args,
+) -> tuple[torch.Tensor, dict]:
+    apply_ncc = _load_ncc_apply()
+    current = qres
+    W_corr = qres.W_dequant
+    history = []
     total_flips = 0
-    bias_before = 0.0
-    bias_after = 0.0
+    first_bias_before = None
+    final_bias_after = None
 
-    for r0 in range(0, out_features, row_chunk):
-        r1 = min(r0 + row_chunk, out_features)
-        rc = r1 - r0
-        Wr = W_fp[r0:r1].float()
-        Wq = Wq_full[r0:r1]
-        idx = indices_full[r0:r1]
-        levels = qres.block_codebooks[r0:r1].to(device).float()
-        L = levels.shape[-1]
+    for sweep_idx in range(args.ncc_sweeps):
+        W_corr, stats = apply_ncc(
+            W_fp=W_fp,
+            qres=current,
+            mu=mu,
+            budget_p=args.ncc_budget_p,
+            use_james_stein=args.ncc_use_james_stein,
+            mu_var=mu_var,
+            row_chunk=args.row_chunk,
+        )
+        bias_before = float(stats.bias_before)
+        bias_after = float(stats.bias_after)
+        improvement = bias_before - bias_after
+        row = {
+            "sweep": sweep_idx + 1,
+            "flips": int(stats.flips),
+            "bias_before": bias_before,
+            "bias_after": bias_after,
+            "improvement": improvement,
+        }
+        history.append(row)
+        total_flips += int(stats.flips)
+        first_bias_before = bias_before if first_bias_before is None else first_bias_before
+        final_bias_after = bias_after
+        if stats.flips == 0 or improvement <= args.ncc_stop_eps:
+            break
+        if sweep_idx + 1 < args.ncc_sweeps:
+            current = _refresh_quant_indices_from_dequant(current, W_corr)
 
-        e = Wq - Wr
-        e_sign = torch.sign(e)
-        b = (e * mu.unsqueeze(0)).sum(dim=1)
-
-        row_ids = torch.arange(rc, device=device).unsqueeze(1)
-        blk_ids = col_block.unsqueeze(0).expand(rc, in_features)
-        left_idx = (idx - 1).clamp(min=0)
-        right_idx = (idx + 1).clamp(max=L - 1)
-        cur = levels[row_ids, blk_ids, idx]
-        left = levels[row_ids, blk_ids, left_idx]
-        right = levels[row_ids, blk_ids, right_idx]
-
-        g_left = (cur - left).abs()
-        g_right = (right - cur).abs()
-        move_down = e_sign > 0
-        gap = torch.where(move_down, g_left, g_right)
-        target_val = torch.where(move_down, left, right)
-        feasible = torch.where(move_down, idx > 0, idx < (L - 1))
-
-        v = mu.unsqueeze(0) * e_sign * gap
-        sign_ok = torch.sign(mu).unsqueeze(0) == torch.sign(e_sign * b.unsqueeze(1))
-        admissible = feasible & sign_ok & (gap > 0)
-        eta = mu.abs().unsqueeze(0) / gap.clamp(min=1e-12)
-        eta = torch.where(admissible, eta, torch.full_like(eta, -1.0))
-        order = torch.argsort(eta, dim=1, descending=True)
-
-        bias_before += float((b * b).sum().item())
-
-        for rr in range(rc):
-            bj = float(b[rr].item())
-            o = order[rr]
-            adm = admissible[rr, o]
-            n_adm = int(adm.sum().item())
-            if n_adm == 0 or bj == 0.0:
-                bias_after += bj * bj
-                continue
-            cap = max(1, math.ceil(budget_p * n_adm))
-            cand = o[:n_adm][:cap]
-            v_cand = v[rr, cand]
-            cumv = torch.cumsum(v_cand, dim=0)
-            residuals = (bj - cumv).abs()
-            best_val, best_k = residuals.min(dim=0)
-            if abs(bj) <= float(best_val.item()):
-                bias_after += bj * bj
-                continue
-            k_star = int(best_k.item()) + 1
-            chosen = cand[:k_star]
-            Wq_corr[r0 + rr, chosen] = target_val[rr, chosen]
-            total_flips += k_star
-            b_new = bj - float(cumv[k_star - 1].item())
-            bias_after += b_new * b_new
-
-        del e, e_sign, gap, v, eta, order, levels, cur, left, right
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return Wq_corr.to(W_fp.dtype), NCCStats(
-        flips=total_flips,
-        bias_before=bias_before,
-        bias_after=bias_after,
-        channels=out_features,
-    )
+    return W_corr, {
+        "flips": total_flips,
+        "bias_before": float(first_bias_before if first_bias_before is not None else 0.0),
+        "bias_after": float(final_bias_after if final_bias_after is not None else 0.0),
+        "objective_before": float(first_bias_before if first_bias_before is not None else 0.0),
+        "objective_after": float(final_bias_after if final_bias_after is not None else 0.0),
+        "sweep_history": history,
+    }
 
 
 @torch.no_grad()
@@ -425,6 +432,7 @@ def quantize_model_gptvq_1d(
         "objective_after": 0.0,
         "variance_increase": 0.0,
     }
+    ncc_sweep_history: list[dict] = []
     diagnostics: list[dict] = []
     diagnostic_inputs: dict[str, list[torch.Tensor]] = {}
     diagnostic_order: list[str] = []
@@ -546,35 +554,48 @@ def quantize_model_gptvq_1d(
                             strict_descent=args.strict_descent,
                         )
                     elif correction == "ncc":
-                        W_corr, stats = apply_ncc_correction(
+                        W_corr, ncc_stats = _apply_ncc_sweeps(
                             W_fp=W_fp.to(device),
                             qres=qres,
                             mu=mu,
-                            budget_p=args.ncc_budget_p,
-                            row_chunk=args.row_chunk,
+                            mu_var=sigma,
+                            args=args,
                         )
                     else:
                         raise ValueError(f"Unknown correction: {correction}")
-                    module.weight.data = W_corr.to(module.weight.data.dtype)
                     if key in diagnostic_inputs:
+                        X_diag = torch.cat(diagnostic_inputs[key], dim=0)
+                        if correction == "ncc":
+                            diagnostics.append(
+                                _activation_error_metrics(
+                                    key=key,
+                                    X_cpu=X_diag,
+                                    W_fp=W_fp,
+                                    W_quant=W_corr,
+                                    variant=f"gptvq_ncc_sweep{len(ncc_stats['sweep_history'])}",
+                                )
+                            )
                         diagnostics.append(
                             _activation_error_metrics(
                                 key=key,
-                                X_cpu=torch.cat(diagnostic_inputs[key], dim=0),
+                                X_cpu=X_diag,
                                 W_fp=W_fp,
-                                W_quant=module.weight.data.detach(),
+                                W_quant=W_corr,
                                 variant=f"gptvq_{correction}",
                             )
                         )
+                    module.weight.data = W_corr.to(module.weight.data.dtype)
                     if correction == "rbvt":
                         for total_key in totals:
                             totals[total_key] += getattr(stats, total_key)
                     else:
-                        totals["flips"] += stats.flips
-                        totals["bias_before"] += stats.bias_before
-                        totals["bias_after"] += stats.bias_after
-                        totals["objective_before"] += stats.bias_before
-                        totals["objective_after"] += stats.bias_after
+                        totals["flips"] += ncc_stats["flips"]
+                        totals["bias_before"] += ncc_stats["bias_before"]
+                        totals["bias_after"] += ncc_stats["bias_after"]
+                        totals["objective_before"] += ncc_stats["objective_before"]
+                        totals["objective_after"] += ncc_stats["objective_after"]
+                        for row in ncc_stats["sweep_history"]:
+                            ncc_sweep_history.append({"layer": key, **row})
                     del qres, W_corr, sigma, mu
 
                 gptq[name].free()
@@ -614,6 +635,10 @@ def quantize_model_gptvq_1d(
             stats["rbvt_topk"] = args.rbvt_topk
         if correction == "ncc":
             stats["ncc_budget_p"] = args.ncc_budget_p
+            stats["ncc_sweeps"] = args.ncc_sweeps
+            stats["ncc_stop_eps"] = args.ncc_stop_eps
+            stats["ncc_use_james_stein"] = args.ncc_use_james_stein
+            stats["ncc_sweep_history"] = ncc_sweep_history
         stats["activation_error_diagnostics"] = diagnostics
         print(
             f"{correction.upper()} summary | "
@@ -1001,6 +1026,24 @@ def build_parser():
     parser.add_argument("--rbvt-lambda", type=float, default=1.0)
     parser.add_argument("--rbvt-topk", type=int, default=0)
     parser.add_argument("--ncc-budget-p", type=float, default=0.02)
+    parser.add_argument(
+        "--ncc-sweeps",
+        type=int,
+        default=1,
+        help="Number of iterative NCC correction sweeps after each GPTVQ-1D layer/module quantization.",
+    )
+    parser.add_argument(
+        "--ncc-stop-eps",
+        type=float,
+        default=0.0,
+        help="Stop NCC sweeps when first-moment bias improvement is at or below this value.",
+    )
+    parser.add_argument(
+        "--ncc-use-james-stein",
+        action="store_true",
+        default=False,
+        help="Use NCCQuant's James-Stein activation-mean shrinkage option.",
+    )
     parser.add_argument("--gap-floor", type=float, default=1e-8)
     parser.add_argument("--strict-descent", action="store_true", default=True)
     parser.add_argument("--allow-overshoot", dest="strict_descent", action="store_false")
@@ -1041,6 +1084,10 @@ def main():
         raise ValueError("--rbvt-lambda must be non-negative.")
     if not 0.0 < args.ncc_budget_p <= 1.0:
         raise ValueError("--ncc-budget-p must be in (0, 1].")
+    if args.ncc_sweeps <= 0:
+        raise ValueError("--ncc-sweeps must be positive.")
+    if args.ncc_stop_eps < 0:
+        raise ValueError("--ncc-stop-eps must be non-negative.")
     _set_seed(args.seed)
     hf_token = resolve_hf_token()
     print(
