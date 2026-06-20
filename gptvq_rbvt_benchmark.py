@@ -11,10 +11,12 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import random
 import shutil
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable
 
@@ -50,6 +52,14 @@ from lm_eval_runner import LMEvalHarnessRunner  # noqa: E402
 from quantizers import apply_rbvt  # noqa: E402
 from quantizers.base_quantizer import QuantResult  # noqa: E402
 from runtime_utils import build_model_slug, load_runtime_env, resolve_hf_token  # noqa: E402
+
+
+@dataclass
+class NCCStats:
+    flips: int
+    bias_before: float
+    bias_after: float
+    channels: int
 
 
 def _hf_device(device: str) -> torch.device:
@@ -272,12 +282,112 @@ def _activation_error_metrics(
 
 
 @torch.no_grad()
+def apply_ncc_correction(
+    W_fp: torch.Tensor,
+    qres: QuantResult,
+    mu: torch.Tensor,
+    budget_p: float = 0.02,
+    row_chunk: int = 1024,
+) -> tuple[torch.Tensor, NCCStats]:
+    """NCCQuant first-moment correction adapted to GPTVQ-1D scalar codebooks.
+
+    This follows NCCQuant/quantizers/ncc.py: compute b_j = mu dot (Wq-W),
+    consider sign-aligned neighbour flips in each scalar codebook, sort by
+    eta=|mu|/gap, then greedily choose the best prefix under budget.
+    """
+    device = W_fp.device
+    out_features, in_features = W_fp.shape
+    bs = qres.block_size
+    mu = mu.to(device).float()
+    Wq_full = qres.W_dequant.to(device).float()
+    indices_full = qres.indices.to(device)
+    Wq_corr = Wq_full.clone()
+    col_block = torch.arange(in_features, device=device) // bs
+
+    total_flips = 0
+    bias_before = 0.0
+    bias_after = 0.0
+
+    for r0 in range(0, out_features, row_chunk):
+        r1 = min(r0 + row_chunk, out_features)
+        rc = r1 - r0
+        Wr = W_fp[r0:r1].float()
+        Wq = Wq_full[r0:r1]
+        idx = indices_full[r0:r1]
+        levels = qres.block_codebooks[r0:r1].to(device).float()
+        L = levels.shape[-1]
+
+        e = Wq - Wr
+        e_sign = torch.sign(e)
+        b = (e * mu.unsqueeze(0)).sum(dim=1)
+
+        row_ids = torch.arange(rc, device=device).unsqueeze(1)
+        blk_ids = col_block.unsqueeze(0).expand(rc, in_features)
+        left_idx = (idx - 1).clamp(min=0)
+        right_idx = (idx + 1).clamp(max=L - 1)
+        cur = levels[row_ids, blk_ids, idx]
+        left = levels[row_ids, blk_ids, left_idx]
+        right = levels[row_ids, blk_ids, right_idx]
+
+        g_left = (cur - left).abs()
+        g_right = (right - cur).abs()
+        move_down = e_sign > 0
+        gap = torch.where(move_down, g_left, g_right)
+        target_val = torch.where(move_down, left, right)
+        feasible = torch.where(move_down, idx > 0, idx < (L - 1))
+
+        v = mu.unsqueeze(0) * e_sign * gap
+        sign_ok = torch.sign(mu).unsqueeze(0) == torch.sign(e_sign * b.unsqueeze(1))
+        admissible = feasible & sign_ok & (gap > 0)
+        eta = mu.abs().unsqueeze(0) / gap.clamp(min=1e-12)
+        eta = torch.where(admissible, eta, torch.full_like(eta, -1.0))
+        order = torch.argsort(eta, dim=1, descending=True)
+
+        bias_before += float((b * b).sum().item())
+
+        for rr in range(rc):
+            bj = float(b[rr].item())
+            o = order[rr]
+            adm = admissible[rr, o]
+            n_adm = int(adm.sum().item())
+            if n_adm == 0 or bj == 0.0:
+                bias_after += bj * bj
+                continue
+            cap = max(1, math.ceil(budget_p * n_adm))
+            cand = o[:n_adm][:cap]
+            v_cand = v[rr, cand]
+            cumv = torch.cumsum(v_cand, dim=0)
+            residuals = (bj - cumv).abs()
+            best_val, best_k = residuals.min(dim=0)
+            if abs(bj) <= float(best_val.item()):
+                bias_after += bj * bj
+                continue
+            k_star = int(best_k.item()) + 1
+            chosen = cand[:k_star]
+            Wq_corr[r0 + rr, chosen] = target_val[rr, chosen]
+            total_flips += k_star
+            b_new = bj - float(cumv[k_star - 1].item())
+            bias_after += b_new * b_new
+
+        del e, e_sign, gap, v, eta, order, levels, cur, left, right
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return Wq_corr.to(W_fp.dtype), NCCStats(
+        flips=total_flips,
+        bias_before=bias_before,
+        bias_after=bias_after,
+        channels=out_features,
+    )
+
+
+@torch.no_grad()
 def quantize_model_gptvq_1d(
     model,
     tokenizer,
     calib_texts: list[str],
     args,
-    use_rbvt: bool,
+    correction: str | None,
     gptvq_state: dict[str, torch.Tensor | str] | None = None,
     gptvq_snapshot_dir: Path | None = None,
 ) -> dict:
@@ -343,7 +453,7 @@ def quantize_model_gptvq_1d(
                 def hook(_module, inp, out):
                     x = inp[0] if isinstance(inp, tuple) else inp
                     gptq[name].add_batch(x.data, out.data)
-                    if use_rbvt:
+                    if correction is not None:
                         _append_diagnostic_inputs(
                             key=key,
                             x=x,
@@ -408,9 +518,9 @@ def quantize_model_gptvq_1d(
                         )
                     )
 
-                if use_rbvt:
+                if correction is not None:
                     if key not in stat_sum:
-                        raise RuntimeError(f"Missing RBVT activation stats for {key}")
+                        raise RuntimeError(f"Missing activation stats for {correction.upper()} layer {key}")
                     W_gptvq = module.weight.data.detach().float()
                     qres = _gptvq_quant_result(
                         W_dequant=W_gptvq,
@@ -423,18 +533,29 @@ def quantize_model_gptvq_1d(
                     mu = stat_sum[key].to(device) / count
                     ex2 = stat_sumsq[key].to(device) / count
                     sigma = (ex2 - mu * mu).clamp(min=0.0)
-                    W_rbvt, stats = apply_rbvt(
-                        W_fp=W_fp.to(device),
-                        qres=qres,
-                        mu=mu,
-                        sigma_ii=sigma if args.rbvt_lambda > 0.0 else None,
-                        rbvt_lambda=args.rbvt_lambda,
-                        rbvt_topk=args.rbvt_topk if args.rbvt_topk > 0 else None,
-                        row_chunk=args.row_chunk,
-                        gap_floor=args.gap_floor,
-                        strict_descent=args.strict_descent,
-                    )
-                    module.weight.data = W_rbvt.to(module.weight.data.dtype)
+                    if correction == "rbvt":
+                        W_corr, stats = apply_rbvt(
+                            W_fp=W_fp.to(device),
+                            qres=qres,
+                            mu=mu,
+                            sigma_ii=sigma if args.rbvt_lambda > 0.0 else None,
+                            rbvt_lambda=args.rbvt_lambda,
+                            rbvt_topk=args.rbvt_topk if args.rbvt_topk > 0 else None,
+                            row_chunk=args.row_chunk,
+                            gap_floor=args.gap_floor,
+                            strict_descent=args.strict_descent,
+                        )
+                    elif correction == "ncc":
+                        W_corr, stats = apply_ncc_correction(
+                            W_fp=W_fp.to(device),
+                            qres=qres,
+                            mu=mu,
+                            budget_p=args.ncc_budget_p,
+                            row_chunk=args.row_chunk,
+                        )
+                    else:
+                        raise ValueError(f"Unknown correction: {correction}")
+                    module.weight.data = W_corr.to(module.weight.data.dtype)
                     if key in diagnostic_inputs:
                         diagnostics.append(
                             _activation_error_metrics(
@@ -442,12 +563,19 @@ def quantize_model_gptvq_1d(
                                 X_cpu=torch.cat(diagnostic_inputs[key], dim=0),
                                 W_fp=W_fp,
                                 W_quant=module.weight.data.detach(),
-                                variant="gptvq_rbvt",
+                                variant=f"gptvq_{correction}",
                             )
                         )
-                    for total_key in totals:
-                        totals[total_key] += getattr(stats, total_key)
-                    del qres, W_rbvt, sigma, mu
+                    if correction == "rbvt":
+                        for total_key in totals:
+                            totals[total_key] += getattr(stats, total_key)
+                    else:
+                        totals["flips"] += stats.flips
+                        totals["bias_before"] += stats.bias_before
+                        totals["bias_after"] += stats.bias_after
+                        totals["objective_before"] += stats.bias_before
+                        totals["objective_after"] += stats.bias_after
+                    del qres, W_corr, sigma, mu
 
                 gptq[name].free()
                 del W_fp
@@ -468,7 +596,7 @@ def quantize_model_gptvq_1d(
     model.config.use_cache = use_cache
     elapsed = time.time() - tick
     stats = {
-        "method": "gptvq_rbvt" if use_rbvt else "gptvq",
+        "method": f"gptvq_{correction}" if correction is not None else "gptvq",
         "bits": args.wbits,
         "vq_dim": 1,
         "num_linear_layers": quantized_layers,
@@ -479,13 +607,16 @@ def quantize_model_gptvq_1d(
         "hessian_weighted_lookups": args.hessian_weighted_lookups,
         "time_sec": elapsed,
     }
-    if use_rbvt:
+    if correction is not None:
         stats.update(totals)
-        stats["rbvt_lambda"] = args.rbvt_lambda
-        stats["rbvt_topk"] = args.rbvt_topk
+        if correction == "rbvt":
+            stats["rbvt_lambda"] = args.rbvt_lambda
+            stats["rbvt_topk"] = args.rbvt_topk
+        if correction == "ncc":
+            stats["ncc_budget_p"] = args.ncc_budget_p
         stats["activation_error_diagnostics"] = diagnostics
         print(
-            "RBVT summary | "
+            f"{correction.upper()} summary | "
             f"flips={totals['flips']} candidates={totals['candidates']} "
             f"bias={totals['bias_before']:.6e}->{totals['bias_after']:.6e}"
         )
@@ -579,8 +710,12 @@ def _write_summary(output_dir: Path, summary: dict):
 def run_variant(variant: str, args, hf_token: str | None):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    use_rbvt = variant == "gptvq_rbvt"
-    label = "GPTVQ_RBVT" if use_rbvt else "GPTVQ"
+    correction = None
+    if variant == "gptvq_rbvt":
+        correction = "rbvt"
+    elif variant == "gptvq_ncc":
+        correction = "ncc"
+    label = variant.upper() if correction is not None else "GPTVQ"
     output_dir = Path(args.output_root) / variant
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,7 +748,7 @@ def run_variant(variant: str, args, hf_token: str | None):
         tokenizer=tokenizer,
         calib_texts=calib_texts,
         args=args,
-        use_rbvt=use_rbvt,
+        correction=correction,
     )
 
     print(f"Saving {label} model to {output_dir} ...")
@@ -673,12 +808,14 @@ def _make_summary(args, variant: str, output_dir: Path, quant_stats: dict, perpl
 def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    print(f"\n{'=' * 80}\nRunning GPTVQ and GPTVQ_RBVT in one GPTVQ pass\n{'=' * 80}")
+    corrected_variant = f"gptvq_{args.correction}"
+    corrected_label = corrected_variant.upper()
+    print(f"\n{'=' * 80}\nRunning GPTVQ and {corrected_label} in one GPTVQ pass\n{'=' * 80}")
     output_root = Path(args.output_root)
     gptvq_dir = output_root / "gptvq"
-    rbvt_dir = output_root / "gptvq_rbvt"
+    corrected_dir = output_root / corrected_variant
     gptvq_dir.mkdir(parents=True, exist_ok=True)
-    rbvt_dir.mkdir(parents=True, exist_ok=True)
+    corrected_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
     if tokenizer.pad_token is None:
@@ -708,18 +845,18 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     snapshot_dir = output_root / "_gptvq_weight_snapshots"
     if snapshot_dir.exists():
         shutil.rmtree(snapshot_dir)
-    rbvt_stats = quantize_model_gptvq_1d(
+    corrected_stats = quantize_model_gptvq_1d(
         model=model,
         tokenizer=tokenizer,
         calib_texts=calib_texts,
         args=args,
-        use_rbvt=True,
+        correction=args.correction,
         gptvq_state=gptvq_state,
         gptvq_snapshot_dir=snapshot_dir,
     )
     gptvq_stats = {
         key: value
-        for key, value in rbvt_stats.items()
+        for key, value in corrected_stats.items()
         if key
         not in {
             "flips",
@@ -736,19 +873,19 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     }
     gptvq_stats["method"] = "gptvq"
     gptvq_stats["shared_gptvq_pass"] = True
-    rbvt_stats["shared_gptvq_pass"] = True
-    all_diagnostics = rbvt_stats.get("activation_error_diagnostics", [])
+    corrected_stats["shared_gptvq_pass"] = True
+    all_diagnostics = corrected_stats.get("activation_error_diagnostics", [])
     if isinstance(all_diagnostics, list):
         gptvq_stats["activation_error_diagnostics"] = [
             row for row in all_diagnostics if row.get("variant") == "gptvq"
         ]
-        rbvt_stats["activation_error_diagnostics"] = [
-            row for row in all_diagnostics if row.get("variant") == "gptvq_rbvt"
+        corrected_stats["activation_error_diagnostics"] = [
+            row for row in all_diagnostics if row.get("variant") == corrected_variant
         ]
 
-    print(f"Saving GPTVQ_RBVT model to {rbvt_dir} ...")
-    model.save_pretrained(rbvt_dir)
-    tokenizer.save_pretrained(rbvt_dir)
+    print(f"Saving {corrected_label} model to {corrected_dir} ...")
+    model.save_pretrained(corrected_dir)
+    tokenizer.save_pretrained(corrected_dir)
 
     print(f"Restoring GPTVQ baseline weights from the shared pass and saving to {gptvq_dir} ...")
     _restore_linear_weights(model, gptvq_state)
@@ -763,7 +900,7 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     summaries = []
     for variant, label, output_dir, quant_stats in (
         ("gptvq", "GPTVQ", gptvq_dir, gptvq_stats),
-        ("gptvq_rbvt", "GPTVQ_RBVT", rbvt_dir, rbvt_stats),
+        (corrected_variant, corrected_label, corrected_dir, corrected_stats),
     ):
         perplexity, lm_eval = evaluate_model(str(output_dir), label, args, hf_token=hf_token)
         summary = _make_summary(
@@ -814,15 +951,26 @@ def print_comparison(summaries: list[dict]):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Compare upstream GPTVQ-1D with GPTVQ-1D + RBVT")
+    parser = argparse.ArgumentParser(description="Compare upstream GPTVQ-1D with post-GPTVQ scalar corrections")
     parser.add_argument("--model-path", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output-root", default="./outputs/gptvq_1d_rbvt_colab")
-    parser.add_argument("--variants", nargs="+", default=["gptvq", "gptvq_rbvt"], choices=["gptvq", "gptvq_rbvt"])
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=["gptvq", "gptvq_rbvt"],
+        choices=["gptvq", "gptvq_rbvt", "gptvq_ncc"],
+    )
     parser.add_argument(
         "--single-pass-compare",
         action="store_true",
-        help="Run GPTVQ once, snapshot GPTVQ weights, apply RBVT, then save/evaluate both variants.",
+        help="Run GPTVQ once, snapshot GPTVQ weights, apply a correction, then save/evaluate both variants.",
+    )
+    parser.add_argument(
+        "--correction",
+        choices=["rbvt", "ncc"],
+        default="rbvt",
+        help="Post-GPTVQ assignment correction used by --single-pass-compare.",
     )
     parser.add_argument(
         "--keep-model-on-device",
@@ -852,6 +1000,7 @@ def build_parser():
     parser.add_argument("--row-chunk", type=int, default=1024)
     parser.add_argument("--rbvt-lambda", type=float, default=1.0)
     parser.add_argument("--rbvt-topk", type=int, default=0)
+    parser.add_argument("--ncc-budget-p", type=float, default=0.02)
     parser.add_argument("--gap-floor", type=float, default=1e-8)
     parser.add_argument("--strict-descent", action="store_true", default=True)
     parser.add_argument("--allow-overshoot", dest="strict_descent", action="store_false")
@@ -890,6 +1039,8 @@ def main():
         raise ValueError("--groupsize must be positive for GPTVQ-1D/RBVT index conversion.")
     if args.rbvt_lambda < 0:
         raise ValueError("--rbvt-lambda must be non-negative.")
+    if not 0.0 < args.ncc_budget_p <= 1.0:
+        raise ValueError("--ncc-budget-p must be in (0, 1].")
     _set_seed(args.seed)
     hf_token = resolve_hf_token()
     print(
