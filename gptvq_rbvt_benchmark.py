@@ -404,7 +404,6 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
     if isinstance(layer, transformers.Conv1D):
         W = W.t()
     W = W.float()
-    W_ref = W.clone()
 
     gptq.tick = time.time()
     H = gptq.H
@@ -414,7 +413,6 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
     dead = torch.diag(H) == 0
     H[dead, dead] = 1
     W[:, dead] = 0
-    W_ref[:, dead] = 0
 
     quantizer = gptq.quantizer
     vq_dim = quantizer.vq_dim
@@ -505,7 +503,7 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
             block_size=count,
         )
         W_corr, ncc_stats = _apply_ncc_sweeps(
-            W_fp=W_ref[:, i1:i2].to(W.device),
+            W_fp=W1_start.to(W.device),
             qres=qres,
             mu=mu[i1:i2],
             mu_var=None,
