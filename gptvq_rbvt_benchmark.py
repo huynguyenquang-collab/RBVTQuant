@@ -389,12 +389,17 @@ def _apply_ncc_sweeps(
 
 
 @torch.no_grad()
-def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dict:
+def _gptvq_fasterquant_with_propagated_targets(
+    gptq: GPTQ,
+    args,
+    mu: torch.Tensor | None = None,
+    apply_ncc_per_block: bool = False,
+) -> tuple[torch.Tensor, dict]:
     if args.wbits not in (3, 4):
-        raise ValueError("Post-block NCC path expects 3-bit or 4-bit GPTVQ.")
-    if args.groupsize != args.gptq_blocksize:
+        raise ValueError("Propagated-target GPTVQ path expects 3-bit or 4-bit GPTVQ.")
+    if apply_ncc_per_block and args.groupsize != args.gptq_blocksize:
         raise ValueError("--ncc-placement post_block currently requires --groupsize == --gptq-blocksize.")
-    if args.include_m_step:
+    if apply_ncc_per_block and args.include_m_step:
         raise ValueError("--ncc-placement post_block must be used with --no-include-m-step.")
 
     layer = gptq.layer
@@ -432,10 +437,11 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
         f"({quantizer.vq_scaling_domain} domain)"
     )
     print(f"Using Hessian-aware K-means {args.hessian_weighted_lookups}")
-    print("NCC placement: post_block")
+    print("NCC placement: post_block" if apply_ncc_per_block else "NCC target capture: propagated")
 
     Losses = torch.zeros_like(W)
     Q = torch.zeros_like(W)
+    W_targets = torch.empty_like(W)
 
     damp = args.percdamp * torch.mean(torch.diag(H))
     diag = torch.arange(gptq.columns, device=gptq.dev)
@@ -453,7 +459,8 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
         "objective_after": 0.0,
         "sweep_history": [],
     }
-    mu = mu.to(W.device).float()
+    if mu is not None:
+        mu = mu.to(W.device).float()
 
     for i1 in range(0, gptq.columns, args.gptq_blocksize):
         i2 = min(i1 + args.gptq_blocksize, gptq.columns)
@@ -461,6 +468,7 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
 
         W1 = W[:, i1:i2].clone()
         W1_start = W1.clone()
+        W_targets[:, i1:i2] = W1_start
         W1_scaled = W1
         S1 = torch.ones_like(W1)
         Q1 = torch.zeros_like(W1)
@@ -495,32 +503,35 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
                 W1[:, i + vq_dim :] -= update
                 Err1[:, i : i + vq_dim] = err1
 
-        qres = _gptvq_quant_result(
-            W_dequant=Q1,
-            assignments=[gptq.assignments[-1]],
-            centroids=[quantizer.all_centroids[-1]],
-            bits=args.wbits,
-            block_size=count,
-        )
-        W_corr, ncc_stats = _apply_ncc_sweeps(
-            W_fp=W1_start.to(W.device),
-            qres=qres,
-            mu=mu[i1:i2],
-            mu_var=None,
-            args=args,
-        )
-        Q1 = W_corr.to(Q1.dtype)
-        d_all = torch.diag(Hinv1).unsqueeze(0).clamp(min=1e-12)
-        Err1 = (W1_start - Q1) / d_all
-        Losses1 = (W1_start - Q1) ** 2 / (d_all**2)
+        if apply_ncc_per_block:
+            if mu is None:
+                raise RuntimeError("post_block NCC requires activation mean mu.")
+            qres = _gptvq_quant_result(
+                W_dequant=Q1,
+                assignments=[gptq.assignments[-1]],
+                centroids=[quantizer.all_centroids[-1]],
+                bits=args.wbits,
+                block_size=count,
+            )
+            W_corr, ncc_stats = _apply_ncc_sweeps(
+                W_fp=W1_start.to(W.device),
+                qres=qres,
+                mu=mu[i1:i2],
+                mu_var=None,
+                args=args,
+            )
+            Q1 = W_corr.to(Q1.dtype)
+            d_all = torch.diag(Hinv1).unsqueeze(0).clamp(min=1e-12)
+            Err1 = (W1_start - Q1) / d_all
+            Losses1 = (W1_start - Q1) ** 2 / (d_all**2)
 
-        for row in ncc_stats["sweep_history"]:
-            totals["sweep_history"].append({"block_start": i1, "block_end": i2, **row})
-        totals["flips"] += ncc_stats["flips"]
-        totals["bias_before"] += ncc_stats["bias_before"]
-        totals["bias_after"] += ncc_stats["bias_after"]
-        totals["objective_before"] += ncc_stats["objective_before"]
-        totals["objective_after"] += ncc_stats["objective_after"]
+            for row in ncc_stats["sweep_history"]:
+                totals["sweep_history"].append({"block_start": i1, "block_end": i2, **row})
+            totals["flips"] += ncc_stats["flips"]
+            totals["bias_before"] += ncc_stats["bias_before"]
+            totals["bias_after"] += ncc_stats["bias_after"]
+            totals["objective_before"] += ncc_stats["objective_before"]
+            totals["objective_after"] += ncc_stats["objective_after"]
 
         Q[:, i1:i2] = Q1
         Losses[:, i1:i2] = Losses1 / 2
@@ -530,10 +541,14 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
     print("time %.2f" % (time.time() - gptq.tick))
     print("error", torch.sum(Losses).item())
 
+    if args.include_m_step:
+        Q = gptq.lut_m_step(Q, groupsize, quantizer, scale=None, svd_rank=None)
+
     if isinstance(layer, transformers.Conv1D):
         Q = Q.t()
+        W_targets = W_targets.t()
     layer.weight.data = Q.reshape(layer.weight.shape).to(layer.weight.data.dtype)
-    return totals
+    return W_targets.reshape(layer.weight.shape).to(layer.weight.data.device), totals
 
 
 @torch.no_grad()
@@ -639,12 +654,19 @@ def quantize_model_gptvq_1d(
                 W_fp = module.weight.data.detach().clone().float()
                 print(f"Quantizing {key} with upstream GPTVQ-1D ...")
                 post_block_ncc = correction == "ncc" and args.ncc_placement == "post_block"
+                capture_propagated_target = correction == "ncc" and args.ncc_placement == "post_module"
+                W_ncc_target = None
                 if post_block_ncc:
                     if key not in stat_sum:
                         raise RuntimeError(f"Missing activation stats for NCC layer {key}")
                     count = max(1, stat_count[key])
                     mu = stat_sum[key].to(device) / count
-                    ncc_stats = _gptvq_fasterquant_ncc_post_block(gptq[name], args=args, mu=mu)
+                    _, ncc_stats = _gptvq_fasterquant_with_propagated_targets(
+                        gptq[name],
+                        args=args,
+                        mu=mu,
+                        apply_ncc_per_block=True,
+                    )
                     totals["flips"] += ncc_stats["flips"]
                     totals["bias_before"] += ncc_stats["bias_before"]
                     totals["bias_after"] += ncc_stats["bias_after"]
@@ -653,6 +675,13 @@ def quantize_model_gptvq_1d(
                     for row in ncc_stats["sweep_history"]:
                         ncc_sweep_history.append({"layer": key, **row})
                     del mu
+                elif capture_propagated_target:
+                    W_ncc_target, _ = _gptvq_fasterquant_with_propagated_targets(
+                        gptq[name],
+                        args=args,
+                        mu=None,
+                        apply_ncc_per_block=False,
+                    )
                 else:
                     gptq[name].fasterquant(
                         blocksize=args.gptq_blocksize,
@@ -684,7 +713,7 @@ def quantize_model_gptvq_1d(
                         _activation_error_metrics(
                             key=key,
                             X_cpu=X_diag,
-                            W_fp=W_fp,
+                            W_fp=W_ncc_target if W_ncc_target is not None else W_fp,
                             W_quant=module.weight.data.detach(),
                             variant="gptvq_ncc" if post_block_ncc else "gptvq",
                         )
@@ -719,7 +748,7 @@ def quantize_model_gptvq_1d(
                         )
                     elif correction == "ncc":
                         W_corr, ncc_stats = _apply_ncc_sweeps(
-                            W_fp=W_fp.to(device),
+                            W_fp=(W_ncc_target if W_ncc_target is not None else W_fp).to(device),
                             qres=qres,
                             mu=mu,
                             mu_var=sigma,
@@ -734,7 +763,7 @@ def quantize_model_gptvq_1d(
                                 _activation_error_metrics(
                                     key=key,
                                     X_cpu=X_diag,
-                                    W_fp=W_fp,
+                                    W_fp=W_ncc_target if W_ncc_target is not None else W_fp,
                                     W_quant=W_corr,
                                     variant=f"gptvq_ncc_sweep{len(ncc_stats['sweep_history'])}",
                                 )
@@ -743,7 +772,7 @@ def quantize_model_gptvq_1d(
                             _activation_error_metrics(
                                 key=key,
                                 X_cpu=X_diag,
-                                W_fp=W_fp,
+                                W_fp=W_ncc_target if W_ncc_target is not None else W_fp,
                                 W_quant=W_corr,
                                 variant=f"gptvq_{correction}",
                             )
