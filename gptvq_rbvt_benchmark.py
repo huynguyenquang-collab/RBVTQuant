@@ -222,6 +222,55 @@ def _gptvq_quant_result(
     )
 
 
+def _append_diagnostic_inputs(
+    *,
+    key: str,
+    x: torch.Tensor,
+    diagnostic_inputs: dict[str, list[torch.Tensor]],
+    diagnostic_order: list[str],
+    args,
+):
+    if args.diagnostic_layer_limit <= 0 or args.diagnostic_max_tokens <= 0:
+        return
+    if key not in diagnostic_inputs:
+        if len(diagnostic_order) >= args.diagnostic_layer_limit:
+            return
+        diagnostic_inputs[key] = []
+        diagnostic_order.append(key)
+
+    current = sum(chunk.shape[0] for chunk in diagnostic_inputs[key])
+    remaining = args.diagnostic_max_tokens - current
+    if remaining <= 0:
+        return
+    x_flat = x.reshape(-1, x.shape[-1]).detach()
+    diagnostic_inputs[key].append(x_flat[:remaining].to(device="cpu", dtype=torch.float16))
+
+
+@torch.no_grad()
+def _activation_error_metrics(
+    *,
+    key: str,
+    X_cpu: torch.Tensor,
+    W_fp: torch.Tensor,
+    W_quant: torch.Tensor,
+    variant: str,
+) -> dict:
+    device = W_quant.device
+    X = X_cpu.to(device=device, dtype=torch.float32)
+    diff = W_fp.to(device=device, dtype=torch.float32) - W_quant.to(device=device, dtype=torch.float32)
+    Yerr = X.matmul(diff.t())
+    metrics = {
+        "layer": key,
+        "variant": variant,
+        "tokens": int(X.shape[0]),
+        "mae": float(Yerr.abs().mean().item()),
+        "mse": float(Yerr.square().mean().item()),
+        "max_abs": float(Yerr.abs().max().item()),
+    }
+    del X, diff, Yerr
+    return metrics
+
+
 @torch.no_grad()
 def quantize_model_gptvq_1d(
     model,
@@ -265,6 +314,9 @@ def quantize_model_gptvq_1d(
         "objective_after": 0.0,
         "variance_increase": 0.0,
     }
+    diagnostics: list[dict] = []
+    diagnostic_inputs: dict[str, list[torch.Tensor]] = {}
+    diagnostic_order: list[str] = []
     quantized_layers = 0
     tick = time.time()
 
@@ -291,6 +343,13 @@ def quantize_model_gptvq_1d(
                     x = inp[0] if isinstance(inp, tuple) else inp
                     gptq[name].add_batch(x.data, out.data)
                     if use_rbvt:
+                        _append_diagnostic_inputs(
+                            key=key,
+                            x=x,
+                            diagnostic_inputs=diagnostic_inputs,
+                            diagnostic_order=diagnostic_order,
+                            args=args,
+                        )
                         x_float = x.reshape(-1, x.shape[-1]).detach().float()
                         stat_sum[key] = stat_sum.get(key, torch.zeros(x_float.shape[-1])).to(x_float.device)
                         stat_sum[key] += x_float.sum(dim=0)
@@ -327,6 +386,17 @@ def quantize_model_gptvq_1d(
                 quantized_layers += 1
                 if gptvq_state is not None:
                     gptvq_state[key] = module.weight.data.detach().cpu().clone()
+                if key in diagnostic_inputs:
+                    X_diag = torch.cat(diagnostic_inputs[key], dim=0)
+                    diagnostics.append(
+                        _activation_error_metrics(
+                            key=key,
+                            X_cpu=X_diag,
+                            W_fp=W_fp,
+                            W_quant=module.weight.data.detach(),
+                            variant="gptvq",
+                        )
+                    )
 
                 if use_rbvt:
                     if key not in stat_sum:
@@ -355,6 +425,16 @@ def quantize_model_gptvq_1d(
                         strict_descent=args.strict_descent,
                     )
                     module.weight.data = W_rbvt.to(module.weight.data.dtype)
+                    if key in diagnostic_inputs:
+                        diagnostics.append(
+                            _activation_error_metrics(
+                                key=key,
+                                X_cpu=torch.cat(diagnostic_inputs[key], dim=0),
+                                W_fp=W_fp,
+                                W_quant=module.weight.data.detach(),
+                                variant="gptvq_rbvt",
+                            )
+                        )
                     for total_key in totals:
                         totals[total_key] += getattr(stats, total_key)
                     del qres, W_rbvt, sigma, mu
@@ -390,11 +470,19 @@ def quantize_model_gptvq_1d(
         stats.update(totals)
         stats["rbvt_lambda"] = args.rbvt_lambda
         stats["rbvt_topk"] = args.rbvt_topk
+        stats["activation_error_diagnostics"] = diagnostics
         print(
             "RBVT summary | "
             f"flips={totals['flips']} candidates={totals['candidates']} "
             f"bias={totals['bias_before']:.6e}->{totals['bias_after']:.6e}"
         )
+        if diagnostics:
+            print("Activation output error diagnostics | X @ (W_fp16 - W_quant).T")
+            for row in diagnostics:
+                print(
+                    f"  {row['layer']} {row['variant']} tokens={row['tokens']} "
+                    f"mae={row['mae']:.6e} mse={row['mse']:.6e} max_abs={row['max_abs']:.6e}"
+                )
     print(f"GPTVQ variant done in {elapsed:.2f}s")
     return stats
 
@@ -624,6 +712,14 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     gptvq_stats["method"] = "gptvq"
     gptvq_stats["shared_gptvq_pass"] = True
     rbvt_stats["shared_gptvq_pass"] = True
+    all_diagnostics = rbvt_stats.get("activation_error_diagnostics", [])
+    if isinstance(all_diagnostics, list):
+        gptvq_stats["activation_error_diagnostics"] = [
+            row for row in all_diagnostics if row.get("variant") == "gptvq"
+        ]
+        rbvt_stats["activation_error_diagnostics"] = [
+            row for row in all_diagnostics if row.get("variant") == "gptvq_rbvt"
+        ]
 
     print(f"Saving GPTVQ_RBVT model to {rbvt_dir} ...")
     model.save_pretrained(rbvt_dir)
@@ -727,6 +823,18 @@ def build_parser():
     parser.add_argument("--gap-floor", type=float, default=1e-8)
     parser.add_argument("--strict-descent", action="store_true", default=True)
     parser.add_argument("--allow-overshoot", dest="strict_descent", action="store_false")
+    parser.add_argument(
+        "--diagnostic-layer-limit",
+        type=int,
+        default=0,
+        help="Number of early Linear layers for X @ (W_fp16 - W_quant).T MAE/MSE diagnostics.",
+    )
+    parser.add_argument(
+        "--diagnostic-max-tokens",
+        type=int,
+        default=4096,
+        help="Maximum calibration tokens retained per diagnostic layer.",
+    )
     parser.add_argument("--eval-stride", type=int, default=512)
     parser.add_argument("--eval-max-length", type=int, default=1024)
     parser.add_argument("--eval-samples", type=int, default=64)
