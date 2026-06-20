@@ -71,12 +71,7 @@ def _linear_key(layer_idx: int, name: str) -> str:
 
 
 def _layer_call(layer: nn.Module, hidden: torch.Tensor, cache: dict) -> torch.Tensor:
-    kwargs = {}
-    if cache.get("attention_mask") is not None:
-        kwargs["attention_mask"] = cache["attention_mask"]
-    if cache.get("position_ids") is not None:
-        kwargs["position_ids"] = cache["position_ids"]
-    return layer(hidden, **kwargs)[0]
+    return layer(hidden, **cache.get("layer_kwargs", {}))[0]
 
 
 def _make_calibration_batches(tokenizer, texts: Iterable[str], seqlen: int) -> list[tuple[torch.Tensor]]:
@@ -106,7 +101,7 @@ def _capture_first_layer_inputs(model, batches, device: torch.device, nsamples: 
     dtype = next(iter(model.parameters())).dtype
     hidden_size = model.config.hidden_size
     inps = torch.zeros((nsamples, seqlen, hidden_size), dtype=dtype, device=device)
-    cache = {"i": 0, "attention_mask": None, "position_ids": None}
+    cache = {"i": 0, "layer_kwargs": {}}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -116,8 +111,7 @@ def _capture_first_layer_inputs(model, batches, device: torch.device, nsamples: 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
-            cache["attention_mask"] = kwargs.get("attention_mask")
-            cache["position_ids"] = kwargs.get("position_ids")
+            cache["layer_kwargs"] = dict(kwargs)
             raise ValueError
 
     layers[0] = Catcher(layers[0])

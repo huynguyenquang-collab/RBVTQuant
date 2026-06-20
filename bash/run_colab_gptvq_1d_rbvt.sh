@@ -39,6 +39,23 @@ else
   git -C GPTVQ pull --ff-only
 fi
 
+python3 - <<'PY'
+import sys
+import transformers
+
+if not hasattr(transformers, "Conv1D"):
+    from transformers.pytorch_utils import Conv1D
+
+    transformers.Conv1D = Conv1D
+
+sys.path.insert(0, "GPTVQ")
+from gptq import GPTQ  # noqa: F401
+from modelutils import find_layers  # noqa: F401
+from vq_quant import VQQuantizer  # noqa: F401
+
+print("GPTVQ import smoke check passed.")
+PY
+
 python3 gptvq_rbvt_benchmark.py \
   --model-path "$MODEL" \
   --device "$DEVICE" \
