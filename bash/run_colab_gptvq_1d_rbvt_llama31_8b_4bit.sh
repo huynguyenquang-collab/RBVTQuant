@@ -78,6 +78,7 @@ COMMON_ARGS=(
   --device "$DEVICE"
   --output-root "$OUTPUT_ROOT"
   --single-pass-compare
+  --keep-model-on-device
   --wbits 4
   --groupsize "$GROUPSIZE"
   --gptq-blocksize 128

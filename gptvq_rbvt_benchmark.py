@@ -278,7 +278,8 @@ def quantize_model_gptvq_1d(
     calib_texts: list[str],
     args,
     use_rbvt: bool,
-    gptvq_state: dict[str, torch.Tensor] | None = None,
+    gptvq_state: dict[str, torch.Tensor | str] | None = None,
+    gptvq_snapshot_dir: Path | None = None,
 ) -> dict:
     device = _hf_device(args.device)
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
@@ -385,7 +386,16 @@ def quantize_model_gptvq_1d(
                 )
                 quantized_layers += 1
                 if gptvq_state is not None:
-                    gptvq_state[key] = module.weight.data.detach().cpu().clone()
+                    snapshot = module.weight.data.detach().cpu().clone()
+                    if gptvq_snapshot_dir is not None:
+                        gptvq_snapshot_dir.mkdir(parents=True, exist_ok=True)
+                        filename = key.replace("/", "__").replace(".", "_") + ".pt"
+                        path = gptvq_snapshot_dir / filename
+                        torch.save(snapshot, path)
+                        gptvq_state[key] = str(path)
+                        del snapshot
+                    else:
+                        gptvq_state[key] = snapshot
                 if key in diagnostic_inputs:
                     X_diag = torch.cat(diagnostic_inputs[key], dim=0)
                     diagnostics.append(
@@ -446,7 +456,10 @@ def quantize_model_gptvq_1d(
         for sample_idx in range(actual_n_calib):
             outs[sample_idx] = _layer_call(layer, inps[sample_idx].unsqueeze(0), cache)
 
-        layers[layer_idx] = layer.cpu()
+        if args.keep_model_on_device:
+            layers[layer_idx] = layer
+        else:
+            layers[layer_idx] = layer.cpu()
         del layer, gptq
         torch.cuda.empty_cache()
         gc.collect()
@@ -488,14 +501,18 @@ def quantize_model_gptvq_1d(
 
 
 @torch.no_grad()
-def _restore_linear_weights(model, state: dict[str, torch.Tensor]):
+def _restore_linear_weights(model, state: dict[str, torch.Tensor | str]):
     modules = dict(model.named_modules())
     missing = []
-    for name, weight in state.items():
+    for name, weight_ref in state.items():
         module = modules.get(name)
         if module is None or not hasattr(module, "weight"):
             missing.append(name)
             continue
+        if isinstance(weight_ref, str):
+            weight = torch.load(weight_ref, map_location="cpu")
+        else:
+            weight = weight_ref
         module.weight.data.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
     if missing:
         raise RuntimeError(f"Missing modules while restoring GPTVQ baseline: {missing[:5]}")
@@ -572,13 +589,15 @@ def run_variant(variant: str, args, hf_token: str | None):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.float16 if args.device.startswith("cuda") else torch.float32,
-        trust_remote_code=True,
-        token=hf_token,
-        low_cpu_mem_usage=True,
-    )
+    load_kwargs = {
+        "torch_dtype": torch.float16 if args.device.startswith("cuda") else torch.float32,
+        "trust_remote_code": True,
+        "token": hf_token,
+        "low_cpu_mem_usage": True,
+    }
+    if args.keep_model_on_device:
+        load_kwargs["device_map"] = {"": args.device}
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
     model.eval()
 
     calib_texts = load_calibration_data(
@@ -665,13 +684,15 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.float16 if args.device.startswith("cuda") else torch.float32,
-        trust_remote_code=True,
-        token=hf_token,
-        low_cpu_mem_usage=True,
-    )
+    load_kwargs = {
+        "torch_dtype": torch.float16 if args.device.startswith("cuda") else torch.float32,
+        "trust_remote_code": True,
+        "token": hf_token,
+        "low_cpu_mem_usage": True,
+    }
+    if args.keep_model_on_device:
+        load_kwargs["device_map"] = {"": args.device}
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
     model.eval()
 
     calib_texts = load_calibration_data(
@@ -683,7 +704,10 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
         cache_dir=args.calibration_cache_dir,
     )
 
-    gptvq_state: dict[str, torch.Tensor] = {}
+    gptvq_state: dict[str, torch.Tensor | str] = {}
+    snapshot_dir = output_root / "_gptvq_weight_snapshots"
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
     rbvt_stats = quantize_model_gptvq_1d(
         model=model,
         tokenizer=tokenizer,
@@ -691,6 +715,7 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
         args=args,
         use_rbvt=True,
         gptvq_state=gptvq_state,
+        gptvq_snapshot_dir=snapshot_dir,
     )
     gptvq_stats = {
         key: value
@@ -729,6 +754,8 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
     _restore_linear_weights(model, gptvq_state)
     model.save_pretrained(gptvq_dir)
     tokenizer.save_pretrained(gptvq_dir)
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
     del model, gptvq_state
     torch.cuda.empty_cache()
     gc.collect()
@@ -796,6 +823,11 @@ def build_parser():
         "--single-pass-compare",
         action="store_true",
         help="Run GPTVQ once, snapshot GPTVQ weights, apply RBVT, then save/evaluate both variants.",
+    )
+    parser.add_argument(
+        "--keep-model-on-device",
+        action="store_true",
+        help="Load and keep the full model on --device. Useful on A100 to avoid CPU RAM OOM.",
     )
     parser.add_argument("--wbits", type=int, default=4, choices=[3, 4])
     parser.add_argument("--groupsize", type=int, default=128)
