@@ -223,7 +223,14 @@ def _gptvq_quant_result(
 
 
 @torch.no_grad()
-def quantize_model_gptvq_1d(model, tokenizer, calib_texts: list[str], args, use_rbvt: bool) -> dict:
+def quantize_model_gptvq_1d(
+    model,
+    tokenizer,
+    calib_texts: list[str],
+    args,
+    use_rbvt: bool,
+    gptvq_state: dict[str, torch.Tensor] | None = None,
+) -> dict:
     device = _hf_device(args.device)
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
         raise RuntimeError("GPTVQ runner expects a Llama-like model with model.layers")
@@ -318,6 +325,8 @@ def quantize_model_gptvq_1d(model, tokenizer, calib_texts: list[str], args, use_
                     only_init_kmeans=False,
                 )
                 quantized_layers += 1
+                if gptvq_state is not None:
+                    gptvq_state[key] = module.weight.data.detach().cpu().clone()
 
                 if use_rbvt:
                     if key not in stat_sum:
@@ -388,6 +397,20 @@ def quantize_model_gptvq_1d(model, tokenizer, calib_texts: list[str], args, use_
         )
     print(f"GPTVQ variant done in {elapsed:.2f}s")
     return stats
+
+
+@torch.no_grad()
+def _restore_linear_weights(model, state: dict[str, torch.Tensor]):
+    modules = dict(model.named_modules())
+    missing = []
+    for name, weight in state.items():
+        module = modules.get(name)
+        if module is None or not hasattr(module, "weight"):
+            missing.append(name)
+            continue
+        module.weight.data.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
+    if missing:
+        raise RuntimeError(f"Missing modules while restoring GPTVQ baseline: {missing[:5]}")
 
 
 def evaluate_model(model_path: str, label: str, args, hf_token: str | None) -> tuple[dict, dict]:
@@ -519,6 +542,124 @@ def run_variant(variant: str, args, hf_token: str | None):
     return summary
 
 
+def _make_summary(args, variant: str, output_dir: Path, quant_stats: dict, perplexity: dict, lm_eval: dict) -> dict:
+    return {
+        "model_path": args.model_path,
+        "variant": variant,
+        "output_dir": str(output_dir),
+        "quantization": quant_stats,
+        "calibration": {
+            "dataset": args.calib_dataset,
+            "n_calib": args.n_calib,
+            "max_length": args.max_length,
+            "seed": args.seed,
+        },
+        "evaluation": {
+            "perplexity": perplexity,
+            "lm_eval": lm_eval,
+            "lm_eval_tasks": args.lm_eval_tasks,
+        },
+        "args": vars(args),
+    }
+
+
+def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f"\n{'=' * 80}\nRunning GPTVQ and GPTVQ_RBVT in one GPTVQ pass\n{'=' * 80}")
+    output_root = Path(args.output_root)
+    gptvq_dir = output_root / "gptvq"
+    rbvt_dir = output_root / "gptvq_rbvt"
+    gptvq_dir.mkdir(parents=True, exist_ok=True)
+    rbvt_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=torch.float16 if args.device.startswith("cuda") else torch.float32,
+        trust_remote_code=True,
+        token=hf_token,
+        low_cpu_mem_usage=True,
+    )
+    model.eval()
+
+    calib_texts = load_calibration_data(
+        dataset_name=args.calib_dataset,
+        tokenizer=tokenizer,
+        n_samples=args.n_calib,
+        seqlen=args.max_length,
+        seed=args.seed,
+        cache_dir=args.calibration_cache_dir,
+    )
+
+    gptvq_state: dict[str, torch.Tensor] = {}
+    rbvt_stats = quantize_model_gptvq_1d(
+        model=model,
+        tokenizer=tokenizer,
+        calib_texts=calib_texts,
+        args=args,
+        use_rbvt=True,
+        gptvq_state=gptvq_state,
+    )
+    gptvq_stats = {
+        key: value
+        for key, value in rbvt_stats.items()
+        if key
+        not in {
+            "flips",
+            "candidates",
+            "boundary_kept",
+            "bias_before",
+            "bias_after",
+            "objective_before",
+            "objective_after",
+            "variance_increase",
+            "rbvt_lambda",
+            "rbvt_topk",
+        }
+    }
+    gptvq_stats["method"] = "gptvq"
+    gptvq_stats["shared_gptvq_pass"] = True
+    rbvt_stats["shared_gptvq_pass"] = True
+
+    print(f"Saving GPTVQ_RBVT model to {rbvt_dir} ...")
+    model.save_pretrained(rbvt_dir)
+    tokenizer.save_pretrained(rbvt_dir)
+
+    print(f"Restoring GPTVQ baseline weights from the shared pass and saving to {gptvq_dir} ...")
+    _restore_linear_weights(model, gptvq_state)
+    model.save_pretrained(gptvq_dir)
+    tokenizer.save_pretrained(gptvq_dir)
+    del model, gptvq_state
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    summaries = []
+    for variant, label, output_dir, quant_stats in (
+        ("gptvq", "GPTVQ", gptvq_dir, gptvq_stats),
+        ("gptvq_rbvt", "GPTVQ_RBVT", rbvt_dir, rbvt_stats),
+    ):
+        perplexity, lm_eval = evaluate_model(str(output_dir), label, args, hf_token=hf_token)
+        summary = _make_summary(
+            args=args,
+            variant=variant,
+            output_dir=output_dir,
+            quant_stats=quant_stats,
+            perplexity=perplexity,
+            lm_eval=lm_eval,
+        )
+        _write_summary(output_dir, summary)
+        summaries.append(summary)
+        if args.cleanup_model_artifacts:
+            _cleanup_model_artifacts(output_dir)
+            print(f"Cleaned model artifacts under {output_dir}; kept run_summary.json")
+
+    return summaries
+
+
 def print_comparison(summaries: list[dict]):
     print("\n" + "=" * 80)
     print("GPTVQ 1D COMPARISON")
@@ -555,7 +696,12 @@ def build_parser():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output-root", default="./outputs/gptvq_1d_rbvt_colab")
     parser.add_argument("--variants", nargs="+", default=["gptvq", "gptvq_rbvt"], choices=["gptvq", "gptvq_rbvt"])
-    parser.add_argument("--wbits", type=int, default=4)
+    parser.add_argument(
+        "--single-pass-compare",
+        action="store_true",
+        help="Run GPTVQ once, snapshot GPTVQ weights, apply RBVT, then save/evaluate both variants.",
+    )
+    parser.add_argument("--wbits", type=int, default=4, choices=[3, 4])
     parser.add_argument("--groupsize", type=int, default=128)
     parser.add_argument("--gptq-blocksize", type=int, default=128)
     parser.add_argument("--percdamp", type=float, default=0.01)
@@ -600,8 +746,6 @@ def build_parser():
 def main():
     load_runtime_env()
     args = build_parser().parse_args()
-    if args.wbits != 4:
-        raise ValueError("This Colab comparison runner is intended for 4-bit GPTVQ-1D.")
     if args.groupsize <= 0:
         raise ValueError("--groupsize must be positive for GPTVQ-1D/RBVT index conversion.")
     if args.rbvt_lambda < 0:
@@ -614,7 +758,10 @@ def main():
     )
     print(f"Model slug: {build_model_slug(args.model_path)}")
 
-    summaries = [run_variant(variant, args, hf_token=hf_token) for variant in args.variants]
+    if args.single_pass_compare:
+        summaries = run_single_pass_compare(args, hf_token=hf_token)
+    else:
+        summaries = [run_variant(variant, args, hf_token=hf_token) for variant in args.variants]
     print_comparison(summaries)
 
 
