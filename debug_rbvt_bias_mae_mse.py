@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Debug GPTVQ-1D + RBVT post-block on the first Llama-like decoder blocks.
+Debug GPTVQ-1D + RBVT on the first Llama-like decoder blocks.
 
 The script compares a plain GPTVQ-1D layer result against the same layer
-quantized with RBVT post-block correction. It reuses the real benchmark helper
-so the post-block path is exactly the one used for full evaluation.
+quantized with RBVT correction. It reuses the real benchmark helpers so the
+post-module and post-block paths match full evaluation.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 from calibration_utils import load_calibration_data  # noqa: E402
 from gptq import GPTQ  # noqa: E402
 from modelutils import find_layers  # noqa: E402
+from quantizers import apply_rbvt  # noqa: E402
 from runtime_utils import load_runtime_env, resolve_hf_token  # noqa: E402
 
 import gptvq_rbvt_benchmark as B  # noqa: E402
@@ -68,7 +69,7 @@ def pct(before: float, after: float) -> float:
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(description="Debug GPTVQ-1D + RBVT post-block metrics")
+    ap = argparse.ArgumentParser(description="Debug GPTVQ-1D + RBVT metrics")
     ap.add_argument("--model-path", default="meta-llama/Llama-3.1-8B")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--max-layers", type=int, default=2)
@@ -91,6 +92,7 @@ def build_parser():
     ap.add_argument("--true-sequential", action="store_true", default=True)
     ap.add_argument("--no-true-sequential", dest="true_sequential", action="store_false")
     ap.add_argument("--row-chunk", type=int, default=1024)
+    ap.add_argument("--rbvt-placement", choices=["post_module", "post_block"], default="post_module")
     ap.add_argument("--rbvt-lambda", type=float, default=1.0)
     ap.add_argument("--rbvt-topk", type=int, default=0)
     ap.add_argument("--gap-floor", type=float, default=1e-8)
@@ -103,16 +105,16 @@ def build_parser():
 def main():
     load_runtime_env()
     args = build_parser().parse_args()
-    if args.groupsize != args.gptq_blocksize:
+    if args.rbvt_placement == "post_block" and args.groupsize != args.gptq_blocksize:
         raise ValueError("RBVT post-block debug currently requires --groupsize == --gptq-blocksize.")
-    if args.include_m_step:
+    if args.rbvt_placement == "post_block" and args.include_m_step:
         raise ValueError("RBVT post-block debug requires no M-step; omit --include-m-step.")
 
     device = torch.device(args.device if args.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
     hf_token = resolve_hf_token()
     print(
         f"[setup] model={args.model_path} device={device} bits={args.wbits} "
-        f"groupsize={args.groupsize} block={args.gptq_blocksize}"
+        f"groupsize={args.groupsize} block={args.gptq_blocksize} placement={args.rbvt_placement}"
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
@@ -196,7 +198,9 @@ def main():
                 for handle in handles:
                     handle.remove()
 
-            h_snapshots = {name: gptq[name].H.detach().clone() for name in subset}
+            h_snapshots = {}
+            if args.rbvt_placement == "post_block":
+                h_snapshots = {name: gptq[name].H.detach().clone() for name in subset}
 
             for name, module in subset.items():
                 key = B._linear_key(layer_idx, name)
@@ -222,16 +226,57 @@ def main():
                 )
                 W_gptvq = module.weight.data.detach().float().clone()
 
-                module.weight.data = W_fp.to(module.weight.data.dtype)
-                rbvt_gptq = GPTQ(module)
-                rbvt_gptq.H = h_snapshots[name].to(device).clone()
-                rbvt_gptq.quantizer = B._make_vq_quantizer(args)
-                stats = B._gptvq_fasterquant_rbvt_post_block(
-                    rbvt_gptq,
-                    args=args,
-                    mu=mu,
-                    sigma=sigma,
-                )
+                if args.rbvt_placement == "post_module":
+                    qres = B._gptvq_quant_result(
+                        W_dequant=W_gptvq,
+                        assignments=gptq[name].assignments,
+                        centroids=gptq[name].quantizer.all_centroids,
+                        bits=args.wbits,
+                        block_size=args.groupsize,
+                    )
+                    dq_diff = (qres.W_dequant.float() - W_gptvq.float()).abs().max().item()
+                    if dq_diff >= 1e-4:
+                        raise RuntimeError(
+                            f"[{key}] QuantResult disagrees with GPTVQ tensor "
+                            f"(max|diff|={dq_diff:.3e})."
+                        )
+                    W_corr, rbvt_stats = apply_rbvt(
+                        W_fp=W_fp.to(device),
+                        qres=qres,
+                        mu=mu,
+                        sigma_ii=sigma if args.rbvt_lambda > 0.0 else None,
+                        rbvt_lambda=args.rbvt_lambda,
+                        rbvt_topk=args.rbvt_topk if args.rbvt_topk > 0 else None,
+                        row_chunk=args.row_chunk,
+                        gap_floor=args.gap_floor,
+                        strict_descent=args.strict_descent,
+                    )
+                    if args.strict_descent and rbvt_stats.objective_after > rbvt_stats.objective_before * (1 + 1e-6) + 1e-12:
+                        raise RuntimeError(
+                            f"[{key}] RBVT objective increased: "
+                            f"{rbvt_stats.objective_before:.6e} -> {rbvt_stats.objective_after:.6e}."
+                        )
+                    stats = {
+                        "flips": rbvt_stats.flips,
+                        "candidates": rbvt_stats.candidates,
+                        "objective_before": rbvt_stats.objective_before,
+                        "objective_after": rbvt_stats.objective_after,
+                        "variance_increase": rbvt_stats.variance_increase,
+                    }
+                    module.weight.data = W_corr.to(module.weight.data.dtype)
+                    del qres, W_corr
+                else:
+                    module.weight.data = W_fp.to(module.weight.data.dtype)
+                    rbvt_gptq = GPTQ(module)
+                    rbvt_gptq.H = h_snapshots[name].to(device).clone()
+                    rbvt_gptq.quantizer = B._make_vq_quantizer(args)
+                    stats = B._gptvq_fasterquant_rbvt_post_block(
+                        rbvt_gptq,
+                        args=args,
+                        mu=mu,
+                        sigma=sigma,
+                    )
+                    rbvt_gptq.free()
                 W_rbvt = module.weight.data.detach().float().clone()
 
                 m_before = weight_metrics(W_fp, W_gptvq)
@@ -269,7 +314,6 @@ def main():
                     f"awMSE {awmse_before:.4e}->{awmse_after:.4e} ({pct(awmse_before, awmse_after):+.2f}%)"
                 )
 
-                rbvt_gptq.free()
                 del W_fp, W_gptvq, W_rbvt, mu, sigma
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
